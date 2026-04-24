@@ -1,0 +1,301 @@
+const express = require('express');
+const { createClient } = require('@supabase/supabase-js');
+const { procesarExcel } = require('../services/documentProcessor/excelProcessor');
+const { procesarPDF } = require('../services/documentProcessor/pdfProcessor');
+const { categorizarTransacciones } = require('../services/documentProcessor/aiCategorizer');
+
+const router = express.Router();
+
+// ─── Cliente Supabase con service_role (acceso total) ────────────────────────
+function getSupabase() {
+  return createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+  );
+}
+
+// ─── Detectar tipo de archivo ─────────────────────────────────────────────────
+function detectarTipo(nombreArchivo) {
+  const ext = (nombreArchivo || '').split('.').pop().toLowerCase();
+  if (['xlsx', 'xls'].includes(ext)) return 'excel';
+  if (ext === 'csv') return 'csv';
+  if (ext === 'pdf') return 'pdf';
+  return null;
+}
+
+// ─── POST /api/documents/process ─────────────────────────────────────────────
+router.post('/process', async (req, res) => {
+  const { archivo_id, empresa_id, importacion_id, bucket_name = 'documentos' } = req.body;
+
+  // Validaciones
+  if (!archivo_id || !empresa_id) {
+    return res.status(400).json({
+      error: 'Faltan campos requeridos: archivo_id, empresa_id',
+    });
+  }
+
+  const supabase = getSupabase();
+  const inicio = Date.now();
+
+  try {
+    // ── 1. Marcar importacion como "procesando" ───────────────────────────────
+    if (importacion_id) {
+      await supabase
+        .from('importaciones_historicas')
+        .update({ estado: 'procesando', fecha_inicio_procesamiento: new Date().toISOString() })
+        .eq('id', importacion_id);
+    }
+
+    // ── 2. Descargar archivo desde Supabase Storage ───────────────────────────
+    const { data: fileData, error: downloadError } = await supabase
+      .storage
+      .from(bucket_name)
+      .download(archivo_id);
+
+    if (downloadError) {
+      throw new Error(`No se pudo descargar el archivo: ${downloadError.message}`);
+    }
+
+    const buffer = Buffer.from(await fileData.arrayBuffer());
+    const nombreArchivo = archivo_id.split('/').pop();
+    const tipo = detectarTipo(nombreArchivo);
+
+    if (!tipo) {
+      throw new Error(`Tipo de archivo no soportado: ${nombreArchivo}. Use Excel, CSV o PDF.`);
+    }
+
+    // ── 3. Procesar según tipo ────────────────────────────────────────────────
+    console.log(`[documentos] Procesando ${nombreArchivo} (${tipo}) para empresa ${empresa_id}`);
+
+    let transacciones;
+    if (tipo === 'excel' || tipo === 'csv') {
+      transacciones = procesarExcel(buffer, nombreArchivo);
+    } else {
+      transacciones = await procesarPDF(buffer);
+    }
+
+    console.log(`[documentos] Extraídas ${transacciones.length} transacciones`);
+
+    // ── 4. Categorizar con IA ─────────────────────────────────────────────────
+    console.log('[documentos] Categorizando con Claude...');
+    const transaccionesCategorizadas = await categorizarTransacciones(transacciones);
+    console.log('[documentos] Categorización completada');
+
+    // ── 5. Preparar registros para Supabase ───────────────────────────────────
+    const registros = transaccionesCategorizadas.map(t => ({
+      empresa_id,
+      importacion_id: importacion_id || null,
+      fecha_transaccion:       t.fecha_transaccion,
+      descripcion_original:    t.descripcion_original,
+      descripcion_normalizada: t.descripcion_normalizada,
+      tipo:                    t.tipo,
+      monto_original:          t.monto_original,
+      moneda_original:         t.moneda_original || 'CLP',
+      categoria_sugerida_ia:   t.categoria_sugerida_ia || null,
+      confianza_deteccion:     t.confianza_deteccion || null,
+      estado:                  'pendiente_revision',
+      fuente:                  t.fuente || 'cartola_banco',
+      archivo_origen:          nombreArchivo,
+    }));
+
+    // ── 6. Guardar transacciones en Supabase ──────────────────────────────────
+    const BATCH = 100; // insertar en lotes para no exceder límites
+    let insertados = 0;
+
+    for (let i = 0; i < registros.length; i += BATCH) {
+      const lote = registros.slice(i, i + BATCH);
+      const { error: insertError } = await supabase
+        .from('transacciones_historicas')
+        .insert(lote);
+
+      if (insertError) {
+        throw new Error(`Error al guardar transacciones: ${insertError.message}`);
+      }
+      insertados += lote.length;
+    }
+
+    // ── 7. Calcular totales ───────────────────────────────────────────────────
+    const totalIngresos = registros
+      .filter(r => r.tipo === 'ingreso')
+      .reduce((sum, r) => sum + r.monto_original, 0);
+
+    const totalEgresos = registros
+      .filter(r => r.tipo === 'egreso')
+      .reduce((sum, r) => sum + r.monto_original, 0);
+
+    // ── 8. Actualizar importacion_historica con resultado ─────────────────────
+    if (importacion_id) {
+      await supabase
+        .from('importaciones_historicas')
+        .update({
+          estado:                   'completado',
+          total_transacciones:      insertados,
+          total_ingresos:           totalIngresos,
+          total_egresos:            totalEgresos,
+          fecha_fin_procesamiento:  new Date().toISOString(),
+          tiempo_procesamiento_ms:  Date.now() - inicio,
+        })
+        .eq('id', importacion_id);
+    }
+
+    const tiempoMs = Date.now() - inicio;
+    console.log(`[documentos] ✓ ${insertados} transacciones guardadas en ${tiempoMs}ms`);
+
+    return res.json({
+      ok: true,
+      resumen: {
+        archivo:              nombreArchivo,
+        tipo,
+        transacciones:        insertados,
+        total_ingresos:       totalIngresos,
+        total_egresos:        totalEgresos,
+        tiempo_ms:            tiempoMs,
+      },
+      ejemplo_transaccion: registros[0] || null,
+    });
+
+  } catch (err) {
+    console.error('[documentos] Error:', err.message);
+
+    // Marcar importacion como fallida
+    if (importacion_id) {
+      await supabase
+        .from('importaciones_historicas')
+        .update({
+          estado:          'error',
+          error_mensaje:   err.message,
+          fecha_fin_procesamiento: new Date().toISOString(),
+        })
+        .eq('id', importacion_id)
+        .catch(() => {});
+    }
+
+    return res.status(500).json({
+      ok: false,
+      error: err.message,
+    });
+  }
+});
+
+// ─── GET /api/documents/results/:empresa_id ──────────────────────────────────
+// Retorna todas las transacciones agrupadas por categoría con totales.
+// Usado por Lovable para construir el Estado de Resultados.
+router.get('/results/:empresa_id', async (req, res) => {
+  const { empresa_id } = req.params;
+  const { desde, hasta, estado } = req.query;
+
+  const supabase = getSupabase();
+
+  try {
+    // ── Construir query base ──────────────────────────────────────────────────
+    let query = supabase
+      .from('transacciones_historicas')
+      .select('tipo, monto_original, categoria_sugerida_ia, confianza_deteccion, fecha_transaccion, descripcion_original, estado, id')
+      .eq('empresa_id', empresa_id)
+      .order('fecha_transaccion', { ascending: true });
+
+    if (desde) query = query.gte('fecha_transaccion', desde);
+    if (hasta) query = query.lte('fecha_transaccion', hasta);
+    if (estado) query = query.eq('estado', estado);
+
+    const { data: transacciones, error } = await query;
+
+    if (error) throw new Error(error.message);
+    if (!transacciones || transacciones.length === 0) {
+      return res.json({
+        ok: true,
+        empresa_id,
+        total_transacciones: 0,
+        resumen: { total_ingresos: 0, total_egresos: 0, resultado_neto: 0 },
+        ingresos: { total: 0, categorias: [] },
+        egresos:  { total: 0, categorias: [] },
+        transacciones: [],
+      });
+    }
+
+    // ── Agrupar por categoría ─────────────────────────────────────────────────
+    const grupos = {};
+    let totalIngresos = 0;
+    let totalEgresos  = 0;
+
+    for (const t of transacciones) {
+      const cat = t.categoria_sugerida_ia || (t.tipo === 'ingreso' ? 'otros_ingresos' : 'otros_gastos');
+      if (!grupos[cat]) {
+        grupos[cat] = {
+          categoria:     cat,
+          tipo:          t.tipo,
+          total:         0,
+          transacciones: 0,
+          confianza_promedio: 0,
+          _conf_sum: 0,
+          _conf_count: 0,
+        };
+      }
+      grupos[cat].total         += Number(t.monto_original);
+      grupos[cat].transacciones += 1;
+      if (t.confianza_deteccion) {
+        grupos[cat]._conf_sum   += Number(t.confianza_deteccion);
+        grupos[cat]._conf_count += 1;
+      }
+
+      if (t.tipo === 'ingreso') totalIngresos += Number(t.monto_original);
+      else                      totalEgresos  += Number(t.monto_original);
+    }
+
+    // Calcular confianza promedio y limpiar campos internos
+    const categorias = Object.values(grupos).map(g => {
+      const confianza = g._conf_count > 0
+        ? Math.round((g._conf_sum / g._conf_count) * 100)
+        : null;
+      const { _conf_sum, _conf_count, ...rest } = g;
+      return { ...rest, confianza_promedio_pct: confianza };
+    });
+
+    const ingresos = categorias
+      .filter(c => c.tipo === 'ingreso')
+      .sort((a, b) => b.total - a.total);
+
+    const egresos = categorias
+      .filter(c => c.tipo === 'egreso')
+      .sort((a, b) => b.total - a.total);
+
+    return res.json({
+      ok: true,
+      empresa_id,
+      periodo: { desde: desde || null, hasta: hasta || null },
+      total_transacciones: transacciones.length,
+      resumen: {
+        total_ingresos:  Math.round(totalIngresos),
+        total_egresos:   Math.round(totalEgresos),
+        resultado_neto:  Math.round(totalIngresos - totalEgresos),
+      },
+      ingresos: {
+        total:     Math.round(totalIngresos),
+        categorias: ingresos,
+      },
+      egresos: {
+        total:     Math.round(totalEgresos),
+        categorias: egresos,
+      },
+    });
+
+  } catch (err) {
+    console.error('[results] Error:', err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── GET /api/documents/test ──────────────────────────────────────────────────
+router.get('/test', (_req, res) => {
+  res.json({
+    ok: true,
+    message: 'Motor de procesamiento de documentos listo',
+    tipos_soportados: ['excel', 'csv', 'pdf'],
+    endpoints: {
+      procesar:    'POST /api/documents/process',
+      resultados:  'GET  /api/documents/results/:empresa_id',
+    },
+  });
+});
+
+module.exports = router;
