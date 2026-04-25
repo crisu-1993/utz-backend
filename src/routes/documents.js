@@ -3,6 +3,7 @@ const { createClient } = require('@supabase/supabase-js');
 const { procesarExcel } = require('../services/documentProcessor/excelProcessor');
 const { procesarPDF } = require('../services/documentProcessor/pdfProcessor');
 const { categorizarTransacciones } = require('../services/documentProcessor/aiCategorizer');
+const { authMiddleware } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -24,13 +25,18 @@ function detectarTipo(nombreArchivo) {
 }
 
 // ─── POST /api/documents/process ─────────────────────────────────────────────
-router.post('/process', async (req, res) => {
-  const { archivo_id, empresa_id, importacion_id, bucket_name = 'documentos' } = req.body;
+// Requiere Authorization: Bearer <token de Supabase>
+// El empresa_id se obtiene del token autenticado; no se toma del body.
+router.post('/process', authMiddleware, async (req, res) => {
+  const { archivo_id, importacion_id, bucket_name = 'documentos' } = req.body;
+
+  // empresa_id y user_id vienen del token validado por authMiddleware
+  const { empresa_id, user_id } = req.auth;
 
   // Validaciones
-  if (!archivo_id || !empresa_id) {
+  if (!archivo_id) {
     return res.status(400).json({
-      error: 'Faltan campos requeridos: archivo_id, empresa_id',
+      error: 'Falta campo requerido: archivo_id',
     });
   }
 
@@ -65,7 +71,7 @@ router.post('/process', async (req, res) => {
     }
 
     // ── 3. Procesar según tipo ────────────────────────────────────────────────
-    console.log(`[documentos] Procesando ${nombreArchivo} (${tipo}) para empresa ${empresa_id}`);
+    console.log(`[documentos] Procesando ${nombreArchivo} (${tipo}) para empresa ${empresa_id} (user: ${user_id})`);
 
     let transacciones;
     if (tipo === 'excel' || tipo === 'csv') {

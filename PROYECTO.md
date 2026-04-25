@@ -144,14 +144,24 @@ curl http://localhost:3001/api/documents/results/00000000-0000-0000-0000-0000000
 
 ---
 
-## Siguiente paso pendiente
+## Estado actual — 2026-04-25
 
-Conectar el frontend (Lovable) con este backend:
+### Nuevos endpoints implementados
 
-1. **Subida de archivos:** Lovable sube el archivo a Supabase Storage y llama a `POST /api/documents/process` con el `archivo_id` y `empresa_id` del usuario autenticado.
+| Método | Endpoint | Autenticación | Descripción |
+|---|---|---|---|
+| `POST` | `/api/documents/process` | Bearer token | Procesa archivo. Obtiene empresa_id del token JWT |
+| `GET` | `/api/resumen/:empresa_id` | No | Resumen financiero. Query: `?periodo=hoy\|semana\|mes\|año` |
+| `GET` | `/api/score/:empresa_id` | No | Score UTZ (0–100). Query: `?mes=4&año=2026` |
 
-2. **Visualización:** Lovable llama a `GET /api/documents/results/:empresa_id` para construir el Estado de Resultados con los datos categorizados.
+### Middleware de autenticación (`src/middleware/auth.js`)
+- Lee `Authorization: Bearer <token>`
+- Valida el token contra Supabase Auth (`supabase.auth.getUser`)
+- Consulta tabla `usuarios` para obtener el `empresa_id` real
+- Adjunta `req.auth = { user_id, email, empresa_id }` al request
 
-3. **Autenticación real:** Reemplazar el `empresa_id` de prueba (`00000000-...`) por el UUID real del usuario autenticado en Supabase Auth.
+### Siguiente paso pendiente
 
-4. **Revisión de transacciones:** Implementar endpoint `PATCH /api/documents/transactions/:id` para que el usuario pueda corregir la categoría sugerida por la IA (cambiar `estado` de `pendiente_revision` a `revisado`).
+1. **Revisión de transacciones:** Implementar `PATCH /api/documents/transactions/:id` para que el usuario corrija categorías (cambiar `estado` de `pendiente_revision` a `revisado`).
+
+2. **Proteger resumen y score:** Si se requiere auth también en esos endpoints, agregar `authMiddleware` y leer `empresa_id` desde `req.auth`.

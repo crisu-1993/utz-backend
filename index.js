@@ -21,8 +21,10 @@ app.get('/', (req, res) => {
 });
 
 // Routes
-app.use('/api/documents',        require('./src/routes/documents'));
+app.use('/api/documents',         require('./src/routes/documents'));
 app.use('/api/estado-resultados', require('./src/routes/estadoResultados'));
+app.use('/api/resumen',           require('./src/routes/resumen'));
+app.use('/api/score',             require('./src/routes/score'));
 
 app.listen(PORT, () => {
   console.log(`UTZ Backend escuchando en http://localhost:${PORT}`);
