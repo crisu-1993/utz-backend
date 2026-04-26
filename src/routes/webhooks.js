@@ -22,24 +22,23 @@ function detectarTipo(nombreArchivo) {
 }
 
 // ─── Resolver empresa_id desde el payload del webhook ────────────────────────
-// Estrategia 1: la ruta del archivo empieza con {empresa_id}/
-// Estrategia 2: buscar en la tabla usuarios por owner (user_id de Supabase)
+// La ruta del archivo sigue el patrón: {auth.uid()}/{nombre_archivo}
+// Se extrae el auth.uid() del primer segmento y se consulta la tabla usuarios.
+// Fallback: usar el campo owner del payload de Supabase Storage.
 async function resolverEmpresaId(supabase, filePath, ownerUserId) {
-  // Estrategia 1: primer segmento del path
-  const segmentos = (filePath || '').split('/');
-  if (segmentos.length >= 2) {
-    const posibleEmpresaId = segmentos[0];
-    // Verificar que existe en la tabla empresas o usuarios
+  // Estrategia principal: primer segmento del path es el auth.uid()
+  const userIdFromPath = (filePath || '').split('/')[0];
+  if (userIdFromPath) {
     const { data } = await supabase
       .from('usuarios')
       .select('empresa_id')
-      .eq('empresa_id', posibleEmpresaId)
-      .limit(1);
-    if (data && data.length > 0) return posibleEmpresaId;
+      .eq('id', userIdFromPath)
+      .single();
+    if (data?.empresa_id) return data.empresa_id;
   }
 
-  // Estrategia 2: buscar por user_id del propietario del archivo
-  if (ownerUserId) {
+  // Fallback: usar el campo owner del payload (también es el auth.uid())
+  if (ownerUserId && ownerUserId !== userIdFromPath) {
     const { data } = await supabase
       .from('usuarios')
       .select('empresa_id')
