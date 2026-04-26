@@ -193,27 +193,26 @@ router.post('/storage', async (req, res) => {
     });
   }
 
-  // ── Buscar empresa por owner_id (el path usa {owner_id}/...) ─────────────────
-  // El primer segmento del path es el auth.uid() del dueño, no el id de la empresa.
-  const ownerId = empresaId; // renombrar para claridad
+  // ── Verificar que el empresa_id existe en la tabla empresas ────────────────
+  // El primer segmento del path es directamente el id de la empresa.
   const { data: empresa, error: empresaErr } = await supabase
     .from('empresas')
     .select('id')
-    .eq('owner_id', ownerId)
+    .eq('id', empresaId)
     .maybeSingle();
 
   if (empresaErr) {
-    console.error(`[webhook] Error consultando empresa para owner '${ownerId}':`, empresaErr.message);
+    console.error(`[webhook] Error consultando empresa '${empresaId}':`, empresaErr.message);
     return res.status(500).json({ ok: false, error: empresaErr.message });
   }
 
   if (!empresa) {
-    console.log(`[webhook] No existe empresa con owner_id '${ownerId}' — path: '${filePath}' — ignorando evento`);
-    return res.json({ ok: true, ignorado: true, razon: `No existe empresa con owner_id '${ownerId}'` });
+    console.log(`[webhook] empresa_id '${empresaId}' no existe en tabla empresas — path: '${filePath}' — ignorando evento`);
+    return res.json({ ok: true, ignorado: true, razon: `empresa_id '${empresaId}' no existe en empresas` });
   }
 
   const empresaRealId = empresa.id;
-  console.log(`[webhook] Empresa encontrada: id='${empresaRealId}' para owner='${ownerId}'`);
+  console.log(`[webhook] Empresa encontrada: id='${empresaRealId}'`);
 
   const nombreArchivo = filePath.split('/').pop();
 
