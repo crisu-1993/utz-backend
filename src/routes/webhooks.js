@@ -126,15 +126,18 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
   } catch (err) {
     console.error('[webhook] Error procesando documento:', err.message);
 
-    await supabase
-      .from('importaciones_historicas')
-      .update({
-        estado:                  'error',
-        error_mensaje:           err.message,
-        fecha_fin_procesamiento: new Date().toISOString(),
-      })
-      .eq('id', importacionId)
-      .catch(() => {});
+    try {
+      await supabase
+        .from('importaciones_historicas')
+        .update({
+          estado:                  'error',
+          error_mensaje:           err.message,
+          fecha_fin_procesamiento: new Date().toISOString(),
+        })
+        .eq('id', importacionId);
+    } catch (_) {
+      // best-effort — no interrumpir si este update también falla
+    }
   }
 }
 
@@ -180,12 +183,33 @@ router.post('/storage', async (req, res) => {
 
   // ── Resolver empresa_id ─────────────────────────────────────────────────────
   const empresaId = resolverEmpresaId(filePath);
+  console.log(`[webhook] empresa_id extraído del path: '${empresaId}' (path completo: '${filePath}')`);
+
   if (!empresaId) {
-    console.error(`[webhook] No se pudo resolver empresa_id para archivo: ${filePath}`);
+    console.error(`[webhook] No se pudo extraer empresa_id del path: ${filePath}`);
     return res.status(422).json({
       ok: false,
       error: 'No se pudo determinar la empresa. El archivo debe estar en una carpeta con el empresa_id.',
     });
+  }
+
+  // ── Verificar que el empresa_id existe en la tabla empresas ────────────────
+  // El path inicial del frontend usa {user_id}/... — ese evento debe ignorarse.
+  // Solo el path de análisis usa {empresa_id}/... y ese sí debe procesarse.
+  const { data: empresaExiste, error: empresaErr } = await supabase
+    .from('empresas')
+    .select('id')
+    .eq('id', empresaId)
+    .maybeSingle();
+
+  if (empresaErr) {
+    console.error(`[webhook] Error consultando empresa ${empresaId}:`, empresaErr.message);
+    return res.status(500).json({ ok: false, error: empresaErr.message });
+  }
+
+  if (!empresaExiste) {
+    console.log(`[webhook] empresa_id '${empresaId}' no existe en tabla empresas — path: '${filePath}' — ignorando evento`);
+    return res.json({ ok: true, ignorado: true, razon: `empresa_id '${empresaId}' no existe en empresas` });
   }
 
   const nombreArchivo = filePath.split('/').pop();
