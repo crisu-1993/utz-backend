@@ -193,24 +193,27 @@ router.post('/storage', async (req, res) => {
     });
   }
 
-  // ── Verificar que el empresa_id existe en la tabla empresas ────────────────
-  // El path inicial del frontend usa {user_id}/... — ese evento debe ignorarse.
-  // Solo el path de análisis usa {empresa_id}/... y ese sí debe procesarse.
-  const { data: empresaExiste, error: empresaErr } = await supabase
+  // ── Buscar empresa por owner_id (el path usa {owner_id}/...) ─────────────────
+  // El primer segmento del path es el auth.uid() del dueño, no el id de la empresa.
+  const ownerId = empresaId; // renombrar para claridad
+  const { data: empresa, error: empresaErr } = await supabase
     .from('empresas')
     .select('id')
-    .eq('id', empresaId)
+    .eq('owner_id', ownerId)
     .maybeSingle();
 
   if (empresaErr) {
-    console.error(`[webhook] Error consultando empresa ${empresaId}:`, empresaErr.message);
+    console.error(`[webhook] Error consultando empresa para owner '${ownerId}':`, empresaErr.message);
     return res.status(500).json({ ok: false, error: empresaErr.message });
   }
 
-  if (!empresaExiste) {
-    console.log(`[webhook] empresa_id '${empresaId}' no existe en tabla empresas — path: '${filePath}' — ignorando evento`);
-    return res.json({ ok: true, ignorado: true, razon: `empresa_id '${empresaId}' no existe en empresas` });
+  if (!empresa) {
+    console.log(`[webhook] No existe empresa con owner_id '${ownerId}' — path: '${filePath}' — ignorando evento`);
+    return res.json({ ok: true, ignorado: true, razon: `No existe empresa con owner_id '${ownerId}'` });
   }
+
+  const empresaRealId = empresa.id;
+  console.log(`[webhook] Empresa encontrada: id='${empresaRealId}' para owner='${ownerId}'`);
 
   const nombreArchivo = filePath.split('/').pop();
 
@@ -218,7 +221,7 @@ router.post('/storage', async (req, res) => {
   const { data: importacion, error: importErr } = await supabase
     .from('importaciones_historicas')
     .insert({
-      empresa_id:      empresaId,
+      empresa_id:      empresaRealId,
       nombre_archivo:  nombreArchivo,
       archivo_path:    filePath,
       bucket_name:     bucketName,
@@ -238,7 +241,7 @@ router.post('/storage', async (req, res) => {
     ok: true,
     mensaje: 'Archivo recibido, procesando en background',
     importacion_id: importacion.id,
-    empresa_id:     empresaId,
+    empresa_id:     empresaRealId,
     archivo:        nombreArchivo,
   });
 
@@ -246,7 +249,7 @@ router.post('/storage', async (req, res) => {
   setImmediate(() => {
     procesarDocumento({
       supabase,
-      empresaId,
+      empresaId:     empresaRealId,
       bucketName,
       filePath,
       importacionId: importacion.id,
