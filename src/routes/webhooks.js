@@ -195,6 +195,7 @@ router.post('/storage', async (req, res) => {
 
   // ── Verificar que el empresa_id existe en la tabla empresas ────────────────
   // El primer segmento del path es directamente el id de la empresa.
+  console.log('[webhook] empresaId raw:', JSON.stringify(empresaId), 'length:', empresaId.length);
   const { data: empresa, error: empresaErr } = await supabase
     .from('empresas')
     .select('id')
