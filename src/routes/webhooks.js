@@ -21,33 +21,11 @@ function detectarTipo(nombreArchivo) {
   return null;
 }
 
-// ─── Resolver empresa_id desde el payload del webhook ────────────────────────
-// La ruta del archivo sigue el patrón: {auth.uid()}/{nombre_archivo}
-// Se extrae el auth.uid() del primer segmento y se consulta la tabla usuarios.
-// Fallback: usar el campo owner del payload de Supabase Storage.
-async function resolverEmpresaId(supabase, filePath, ownerUserId) {
-  // Estrategia principal: primer segmento del path es el auth.uid()
-  const userIdFromPath = (filePath || '').split('/')[0];
-  if (userIdFromPath) {
-    const { data } = await supabase
-      .from('usuarios')
-      .select('empresa_id')
-      .eq('id', userIdFromPath)
-      .single();
-    if (data?.empresa_id) return data.empresa_id;
-  }
-
-  // Fallback: usar el campo owner del payload (también es el auth.uid())
-  if (ownerUserId && ownerUserId !== userIdFromPath) {
-    const { data } = await supabase
-      .from('usuarios')
-      .select('empresa_id')
-      .eq('id', ownerUserId)
-      .single();
-    if (data?.empresa_id) return data.empresa_id;
-  }
-
-  return null;
+// ─── Resolver empresa_id desde el path del archivo ───────────────────────────
+// El bucket 'documentos' usa el patrón: {empresa_id}/{fecha}/{nombre_archivo}
+// El primer segmento del path es directamente el empresa_id — no hay lookup.
+function resolverEmpresaId(filePath) {
+  return (filePath || '').split('/')[0] || null;
 }
 
 // ─── Procesamiento asíncrono del documento ────────────────────────────────────
@@ -201,7 +179,7 @@ router.post('/storage', async (req, res) => {
   const supabase = getSupabase();
 
   // ── Resolver empresa_id ─────────────────────────────────────────────────────
-  const empresaId = await resolverEmpresaId(supabase, filePath, ownerUserId);
+  const empresaId = resolverEmpresaId(filePath);
   if (!empresaId) {
     console.error(`[webhook] No se pudo resolver empresa_id para archivo: ${filePath}`);
     return res.status(422).json({
