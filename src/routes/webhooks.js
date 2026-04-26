@@ -1,0 +1,256 @@
+const express = require('express');
+const { createClient } = require('@supabase/supabase-js');
+const { procesarExcel } = require('../services/documentProcessor/excelProcessor');
+const { procesarPDF } = require('../services/documentProcessor/pdfProcessor');
+const { categorizarTransacciones } = require('../services/documentProcessor/aiCategorizer');
+
+const router = express.Router();
+
+function getSupabase() {
+  return createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+  );
+}
+
+function detectarTipo(nombreArchivo) {
+  const ext = (nombreArchivo || '').split('.').pop().toLowerCase();
+  if (['xlsx', 'xls'].includes(ext)) return 'excel';
+  if (ext === 'csv') return 'csv';
+  if (ext === 'pdf') return 'pdf';
+  return null;
+}
+
+// ─── Resolver empresa_id desde el payload del webhook ────────────────────────
+// Estrategia 1: la ruta del archivo empieza con {empresa_id}/
+// Estrategia 2: buscar en la tabla usuarios por owner (user_id de Supabase)
+async function resolverEmpresaId(supabase, filePath, ownerUserId) {
+  // Estrategia 1: primer segmento del path
+  const segmentos = (filePath || '').split('/');
+  if (segmentos.length >= 2) {
+    const posibleEmpresaId = segmentos[0];
+    // Verificar que existe en la tabla empresas o usuarios
+    const { data } = await supabase
+      .from('usuarios')
+      .select('empresa_id')
+      .eq('empresa_id', posibleEmpresaId)
+      .limit(1);
+    if (data && data.length > 0) return posibleEmpresaId;
+  }
+
+  // Estrategia 2: buscar por user_id del propietario del archivo
+  if (ownerUserId) {
+    const { data } = await supabase
+      .from('usuarios')
+      .select('empresa_id')
+      .eq('id', ownerUserId)
+      .single();
+    if (data?.empresa_id) return data.empresa_id;
+  }
+
+  return null;
+}
+
+// ─── Procesamiento asíncrono del documento ────────────────────────────────────
+async function procesarDocumento({ supabase, empresaId, bucketName, filePath, importacionId }) {
+  const inicio = Date.now();
+  const nombreArchivo = filePath.split('/').pop();
+
+  try {
+    // 1. Marcar como procesando
+    await supabase
+      .from('importaciones_historicas')
+      .update({
+        estado: 'procesando',
+        fecha_inicio_procesamiento: new Date().toISOString(),
+      })
+      .eq('id', importacionId);
+
+    // 2. Descargar archivo desde Storage
+    const { data: fileData, error: downloadError } = await supabase
+      .storage
+      .from(bucketName)
+      .download(filePath);
+
+    if (downloadError) throw new Error(`Error descargando archivo: ${downloadError.message}`);
+
+    const buffer = Buffer.from(await fileData.arrayBuffer());
+    const tipo = detectarTipo(nombreArchivo);
+
+    if (!tipo) throw new Error(`Tipo no soportado: ${nombreArchivo}. Use Excel, CSV o PDF.`);
+
+    console.log(`[webhook] Procesando ${nombreArchivo} (${tipo}) para empresa ${empresaId}`);
+
+    // 3. Extraer transacciones según tipo
+    let transacciones;
+    if (tipo === 'excel' || tipo === 'csv') {
+      transacciones = procesarExcel(buffer, nombreArchivo);
+    } else {
+      transacciones = await procesarPDF(buffer);
+    }
+
+    console.log(`[webhook] Extraídas ${transacciones.length} transacciones`);
+
+    // 4. Categorizar con IA
+    console.log('[webhook] Categorizando con Claude...');
+    const categorizadas = await categorizarTransacciones(transacciones);
+    console.log('[webhook] Categorización completada');
+
+    // 5. Preparar registros
+    const registros = categorizadas.map(t => ({
+      empresa_id:              empresaId,
+      importacion_id:          importacionId,
+      fecha_transaccion:       t.fecha_transaccion,
+      descripcion_original:    t.descripcion_original,
+      descripcion_normalizada: t.descripcion_normalizada,
+      tipo:                    t.tipo,
+      monto_original:          t.monto_original,
+      moneda_original:         t.moneda_original || 'CLP',
+      categoria_sugerida_ia:   t.categoria_sugerida_ia || null,
+      confianza_deteccion:     t.confianza_deteccion || null,
+      estado:                  'pendiente_revision',
+      fuente:                  t.fuente || 'cartola_banco',
+      archivo_origen:          nombreArchivo,
+    }));
+
+    // 6. Insertar en lotes de 100
+    const BATCH = 100;
+    let insertados = 0;
+    for (let i = 0; i < registros.length; i += BATCH) {
+      const lote = registros.slice(i, i + BATCH);
+      const { error } = await supabase.from('transacciones_historicas').insert(lote);
+      if (error) throw new Error(`Error guardando transacciones: ${error.message}`);
+      insertados += lote.length;
+    }
+
+    // 7. Calcular totales
+    const totalIngresos = registros
+      .filter(r => r.tipo === 'ingreso')
+      .reduce((s, r) => s + r.monto_original, 0);
+    const totalEgresos = registros
+      .filter(r => r.tipo === 'egreso')
+      .reduce((s, r) => s + r.monto_original, 0);
+
+    // 8. Actualizar importacion como completada
+    await supabase
+      .from('importaciones_historicas')
+      .update({
+        estado:                  'completado',
+        total_transacciones:     insertados,
+        total_ingresos:          Math.round(totalIngresos),
+        total_egresos:           Math.round(totalEgresos),
+        fecha_fin_procesamiento: new Date().toISOString(),
+        tiempo_procesamiento_ms: Date.now() - inicio,
+      })
+      .eq('id', importacionId);
+
+    console.log(`[webhook] ✓ ${insertados} transacciones guardadas para empresa ${empresaId} en ${Date.now() - inicio}ms`);
+
+  } catch (err) {
+    console.error('[webhook] Error procesando documento:', err.message);
+
+    await supabase
+      .from('importaciones_historicas')
+      .update({
+        estado:                  'error',
+        error_mensaje:           err.message,
+        fecha_fin_procesamiento: new Date().toISOString(),
+      })
+      .eq('id', importacionId)
+      .catch(() => {});
+  }
+}
+
+// ─── POST /api/webhooks/storage ───────────────────────────────────────────────
+// Disparado por Supabase Database Webhook cuando se inserta en storage.objects.
+// Configura el webhook en: Supabase → Database → Webhooks → New Webhook
+//   Table:  storage.objects
+//   Events: INSERT
+//   URL:    https://tu-backend.com/api/webhooks/storage
+//   HTTP Headers: { "x-webhook-secret": "<WEBHOOK_SECRET>" }
+router.post('/storage', async (req, res) => {
+  // ── Verificar secret ────────────────────────────────────────────────────────
+  const secret = req.headers['x-webhook-secret'];
+  if (process.env.WEBHOOK_SECRET && secret !== process.env.WEBHOOK_SECRET) {
+    return res.status(401).json({ ok: false, error: 'Secret inválido' });
+  }
+
+  const payload = req.body;
+
+  // ── Validar que es un INSERT en storage.objects ─────────────────────────────
+  if (payload.type !== 'INSERT' || payload.table !== 'objects') {
+    return res.json({ ok: true, ignorado: true, razon: 'No es un INSERT en storage.objects' });
+  }
+
+  const record = payload.record || {};
+  const bucketName = record.bucket_id;
+  const filePath   = record.name;       // e.g. "empresa-123/cartola_abril.xlsx"
+  const ownerUserId = record.owner;
+
+  // Ignorar buckets que no sean de documentos
+  const BUCKETS_ACEPTADOS = (process.env.STORAGE_BUCKETS || 'documentos').split(',');
+  if (!BUCKETS_ACEPTADOS.includes(bucketName)) {
+    return res.json({ ok: true, ignorado: true, razon: `Bucket '${bucketName}' no procesado` });
+  }
+
+  // Ignorar archivos con extensión no soportada
+  const tipo = detectarTipo(filePath);
+  if (!tipo) {
+    return res.json({ ok: true, ignorado: true, razon: `Extensión no soportada: ${filePath}` });
+  }
+
+  const supabase = getSupabase();
+
+  // ── Resolver empresa_id ─────────────────────────────────────────────────────
+  const empresaId = await resolverEmpresaId(supabase, filePath, ownerUserId);
+  if (!empresaId) {
+    console.error(`[webhook] No se pudo resolver empresa_id para archivo: ${filePath}`);
+    return res.status(422).json({
+      ok: false,
+      error: 'No se pudo determinar la empresa. El archivo debe estar en una carpeta con el empresa_id.',
+    });
+  }
+
+  const nombreArchivo = filePath.split('/').pop();
+
+  // ── Crear registro en importaciones_historicas ──────────────────────────────
+  const { data: importacion, error: importErr } = await supabase
+    .from('importaciones_historicas')
+    .insert({
+      empresa_id:      empresaId,
+      nombre_archivo:  nombreArchivo,
+      archivo_path:    filePath,
+      bucket_name:     bucketName,
+      estado:          'pendiente',
+      fecha_subida:    new Date().toISOString(),
+    })
+    .select('id')
+    .single();
+
+  if (importErr) {
+    console.error('[webhook] Error creando importacion:', importErr.message);
+    return res.status(500).json({ ok: false, error: importErr.message });
+  }
+
+  // ── Responder inmediatamente y procesar en background ──────────────────────
+  res.json({
+    ok: true,
+    mensaje: 'Archivo recibido, procesando en background',
+    importacion_id: importacion.id,
+    empresa_id:     empresaId,
+    archivo:        nombreArchivo,
+  });
+
+  // Procesar sin bloquear la respuesta HTTP
+  setImmediate(() => {
+    procesarDocumento({
+      supabase,
+      empresaId,
+      bucketName,
+      filePath,
+      importacionId: importacion.id,
+    });
+  });
+});
+
+module.exports = router;

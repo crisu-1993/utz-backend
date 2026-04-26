@@ -22,6 +22,7 @@ app.get('/', (req, res) => {
 
 // Routes
 app.use('/api/documents',         require('./src/routes/documents'));
+app.use('/api/webhooks',          require('./src/routes/webhooks'));
 app.use('/api/estado-resultados', require('./src/routes/estadoResultados'));
 app.use('/api/resumen',           require('./src/routes/resumen'));
 app.use('/api/score',             require('./src/routes/score'));

@@ -291,6 +291,68 @@ router.get('/results/:empresa_id', async (req, res) => {
   }
 });
 
+// ─── GET /api/documents/status/:empresa_id ───────────────────────────────────
+// Retorna el estado actual del procesamiento y un resumen de la última importación.
+router.get('/status/:empresa_id', async (req, res) => {
+  const { empresa_id } = req.params;
+  const supabase = getSupabase();
+
+  try {
+    // ── Última importación ────────────────────────────────────────────────────
+    const { data: importaciones, error: impErr } = await supabase
+      .from('importaciones_historicas')
+      .select('id, nombre_archivo, estado, fecha_subida, fecha_fin_procesamiento, total_transacciones, total_ingresos, total_egresos, error_mensaje')
+      .eq('empresa_id', empresa_id)
+      .order('fecha_subida', { ascending: false })
+      .limit(1);
+
+    if (impErr) throw new Error(impErr.message);
+
+    const ultimaImportacion = importaciones?.[0] || null;
+    const procesando = ultimaImportacion?.estado === 'procesando' ||
+                       ultimaImportacion?.estado === 'pendiente';
+
+    // ── Totales históricos ────────────────────────────────────────────────────
+    const { data: totales, error: totErr } = await supabase
+      .from('transacciones_historicas')
+      .select('fecha_transaccion')
+      .eq('empresa_id', empresa_id)
+      .order('fecha_transaccion', { ascending: true });
+
+    if (totErr) throw new Error(totErr.message);
+
+    const totalTransacciones = totales?.length || 0;
+    const primerRegistro = totales?.[0]?.fecha_transaccion || null;
+    const ultimoRegistro = totales?.[totalTransacciones - 1]?.fecha_transaccion || null;
+
+    // ── Construir respuesta ───────────────────────────────────────────────────
+    return res.json({
+      ok: true,
+      empresa_id,
+      procesando,
+      ultima_importacion: ultimaImportacion
+        ? {
+            id:                       ultimaImportacion.id,
+            fecha:                    (ultimaImportacion.fecha_fin_procesamiento || ultimaImportacion.fecha_subida || '').split('T')[0],
+            archivo:                  ultimaImportacion.nombre_archivo,
+            estado:                   ultimaImportacion.estado,
+            transacciones_procesadas: ultimaImportacion.total_transacciones || 0,
+            total_ingresos:           ultimaImportacion.total_ingresos || 0,
+            total_egresos:            ultimaImportacion.total_egresos || 0,
+            error:                    ultimaImportacion.error_mensaje || null,
+          }
+        : null,
+      total_transacciones: totalTransacciones,
+      primer_registro:     primerRegistro,
+      ultimo_registro:     ultimoRegistro,
+    });
+
+  } catch (err) {
+    console.error('[status] Error:', err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── GET /api/documents/test ──────────────────────────────────────────────────
 router.get('/test', (_req, res) => {
   res.json({
@@ -300,6 +362,8 @@ router.get('/test', (_req, res) => {
     endpoints: {
       procesar:    'POST /api/documents/process',
       resultados:  'GET  /api/documents/results/:empresa_id',
+      estado:      'GET  /api/documents/status/:empresa_id',
+      webhook:     'POST /api/webhooks/storage',
     },
   });
 });
