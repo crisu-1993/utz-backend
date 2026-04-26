@@ -98,6 +98,7 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
     for (let i = 0; i < registros.length; i += BATCH) {
       const lote = registros.slice(i, i + BATCH);
       console.log('[webhook] muestra lote:', JSON.stringify(lote.slice(0,3).map(t => ({ monto: t.monto_original, confianza: t.confianza_deteccion }))));
+      console.log('[webhook] primer registro lote:', JSON.stringify(lote[0]));
       const { error } = await supabase.from('transacciones_historicas').insert(lote);
       if (error) throw new Error(`Error guardando transacciones: ${error.message}`);
       insertados += lote.length;
