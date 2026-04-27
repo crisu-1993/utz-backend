@@ -86,8 +86,10 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
         fecha_transaccion:       t.fecha_transaccion,
         descripcion_original:    t.descripcion_original,
         descripcion_normalizada: t.descripcion_normalizada,
+        numero_documento:        t.numero_documento || null,
         tipo:                    t.tipo,
         monto_original:          monto,
+        saldo_posterior:         t.saldo_posterior || null,
         moneda_original:         t.moneda_original || 'CLP',
         categoria_sugerida_ia:   t.categoria_sugerida_ia || null,
         confianza_deteccion:     t.confianza_deteccion != null

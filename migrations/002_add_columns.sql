@@ -13,3 +13,7 @@ COMMENT ON COLUMN transacciones_historicas.numero_documento IS
 
 COMMENT ON COLUMN transacciones_historicas.saldo_posterior IS
   'Saldo de la cuenta después de aplicado el movimiento.';
+
+-- Limpiar datos incorrectos de la empresa de prueba
+DELETE FROM transacciones_historicas
+WHERE empresa_id = '1c749792-3add-4cb5-929f-9bd5837bf1f5';

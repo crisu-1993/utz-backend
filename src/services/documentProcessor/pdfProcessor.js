@@ -1,12 +1,14 @@
 // pdfProcessor.js — Pipeline de 3 pasos con pdf2json
 //
 // Paso 1 — Extracción pura: pdf2json entrega texto + líneas verticales (VLines)
-// Paso 2 — Fronteras exactas: las VLines de la tabla son los bordes de columna.
-//           Si no hay VLines, fallback con midpoints entre los x del encabezado.
+// Paso 2 — Asignación de columna:
+//   · Con VLines: fronteras exactas entre columnas (preferido)
+//   · Sin VLines: distancia mínima al encabezado (cada elemento va a la columna
+//                  cuyo x está más cerca del x del elemento)
 // Paso 3 — Regla inviolable:
-//           zona Cargos → tipo: 'egreso'   (NUNCA lo decide la IA)
-//           zona Abonos → tipo: 'ingreso'  (NUNCA lo decide la IA)
-//           zona Docto. → numero_documento (NUNCA monto)
+//           columna docto  → numero_documento (NUNCA monto)
+//           columna cargos → tipo: 'egreso'   (NUNCA lo decide la IA)
+//           columna abonos → tipo: 'ingreso'  (NUNCA lo decide la IA)
 //
 // Ver SKILL_CARTOLA.md para reglas completas de parsing.
 
@@ -210,75 +212,79 @@ function detectarEncabezado(filas) {
   return null;
 }
 
-// ─── PASO 2d: Crear zonas de columna ─────────────────────────────────────────
-// Devuelve { col: { xMin, xMax } } — las zonas son EXCLUSIVAS y no se superponen.
-//
-// Con VLines: cada col queda en el intervalo [vline_i, vline_i+1) que contiene su x.
-// Sin VLines: midpoints entre los x del encabezado ordenados por x.
-function crearZonas(colMap, fronteras) {
+// ─── PASO 2d (modo VLines): crear zonas exactas por líneas verticales ────────
+// Devuelve { col: { xMin, xMax } } usando las fronteras reales del PDF.
+function crearZonasVLines(colMap, fronteras) {
   const zonas = {};
-  const colsOrdenadas = Object.entries(colMap).sort((a, b) => a[1] - b[1]);
+  for (const [col, cx] of Object.entries(colMap)) {
+    let xMin = -Infinity;
+    let xMax = Infinity;
 
-  if (fronteras.length >= 2) {
-    // ── Modo VLines: fronteras exactas ────────────────────────────────────────
-    for (const [col, cx] of Object.entries(colMap)) {
-      // Encontrar el intervalo [fronteras[i], fronteras[i+1]) que contiene cx
-      let xMin = -Infinity;
-      let xMax = Infinity;
-
-      if (cx < fronteras[0]) {
-        xMax = fronteras[0];
-      } else if (cx >= fronteras[fronteras.length - 1]) {
-        xMin = fronteras[fronteras.length - 1];
-      } else {
-        for (let i = 0; i < fronteras.length - 1; i++) {
-          if (cx >= fronteras[i] && cx < fronteras[i + 1]) {
-            xMin = fronteras[i];
-            xMax = fronteras[i + 1];
-            break;
-          }
+    if (cx < fronteras[0]) {
+      xMax = fronteras[0];
+    } else if (cx >= fronteras[fronteras.length - 1]) {
+      xMin = fronteras[fronteras.length - 1];
+    } else {
+      for (let i = 0; i < fronteras.length - 1; i++) {
+        if (cx >= fronteras[i] && cx < fronteras[i + 1]) {
+          xMin = fronteras[i];
+          xMax = fronteras[i + 1];
+          break;
         }
       }
-      zonas[col] = { xMin, xMax };
     }
-    console.log('[PDF] Zonas por VLines:', JSON.stringify(
-      Object.fromEntries(Object.entries(zonas).map(([c, z]) => [c, `[${z.xMin.toFixed(1)}, ${z.xMax.toFixed(1)})`]))
-    ));
-  } else {
-    // ── Fallback: midpoints entre columnas ordenadas ───────────────────────────
-    for (let i = 0; i < colsOrdenadas.length; i++) {
-      const [col, cx] = colsOrdenadas[i];
-      const xMin = i === 0
-        ? -Infinity
-        : (colsOrdenadas[i - 1][1] + cx) / 2;
-      const xMax = i === colsOrdenadas.length - 1
-        ? Infinity
-        : (cx + colsOrdenadas[i + 1][1]) / 2;
-      zonas[col] = { xMin, xMax };
-    }
-    console.log('[PDF] Zonas por midpoints (sin VLines):', JSON.stringify(
-      Object.fromEntries(Object.entries(zonas).map(([c, z]) => [c, `[${z.xMin.toFixed(1)}, ${z.xMax.toFixed(1)})`]))
-    ));
+    zonas[col] = { xMin, xMax };
   }
-
+  console.log('[PDF] Zonas por VLines:', JSON.stringify(
+    Object.fromEntries(Object.entries(zonas).map(([c, z]) => [c, `[${isFinite(z.xMin) ? z.xMin.toFixed(2) : '-∞'}, ${isFinite(z.xMax) ? z.xMax.toFixed(2) : '+∞'})`]))
+  ));
   return zonas;
 }
 
-// ─── PASO 3: Asignar items de una fila a su zona de columna ──────────────────
-// Regla inviolable: la POSICIÓN determina el tipo, no la IA.
+// ─── Asignar items a columna por zona (modo VLines) ──────────────────────────
 function asignarPorZona(fila, zonas) {
   const celdas = {};
   for (const item of fila.items) {
-    let asignado = false;
     for (const [col, { xMin, xMax }] of Object.entries(zonas)) {
       if (item.x >= xMin && item.x < xMax) {
         celdas[col] = ((celdas[col] || '') + ' ' + item.text).trim();
-        asignado = true;
         break;
       }
     }
-    // Si no cae en ninguna zona conocida, ignorar (es texto fuera de la tabla)
   }
+  return celdas;
+}
+
+// ─── PASO 2d (fallback sin VLines): distancia mínima al encabezado ────────────
+// Cada elemento de texto se asigna a la columna cuyo x del encabezado está
+// más cerca del x del elemento. Regla: docto → documento, cargos → egreso,
+// abonos → ingreso. La IA no interviene en esta decisión.
+//
+// Ejemplo (datos reales Scotiabank):
+//   elemento x=18.132, docto=18.597, cargos=22.169
+//   → dist a docto=0.465, dist a cargos=4.037 → asignado a docto ✓
+//
+//   elemento x=23.002, cargos=22.169, abonos=25.756
+//   → dist a cargos=0.833, dist a abonos=2.754 → asignado a cargos ✓
+function asignarPorDistancia(fila, colMap) {
+  const cols = Object.entries(colMap);  // [[col, x_encabezado], ...]
+  const celdas = {};
+
+  for (const item of fila.items) {
+    let nearestCol = null;
+    let minDist    = Infinity;
+    for (const [col, cx] of cols) {
+      const dist = Math.abs(item.x - cx);
+      if (dist < minDist) {
+        minDist    = dist;
+        nearestCol = col;
+      }
+    }
+    if (nearestCol) {
+      celdas[nearestCol] = ((celdas[nearestCol] || '') + ' ' + item.text).trim();
+    }
+  }
+
   return celdas;
 }
 
@@ -314,12 +320,12 @@ async function parsearPDF(buffer) {
     return [];
   }
 
-  // Paso 2d: Crear zonas de columna con VLines o fallback
-  const zonas = crearZonas(header.colMap, fronteras);
+  // Paso 2d: Determinar método de asignación de columna
+  const usaVLines = fronteras.length >= 2;
+  const zonas     = usaVLines ? crearZonasVLines(header.colMap, fronteras) : null;
 
-  // Verificar que tenemos zonas para cargos y abonos
-  if (!zonas.cargos || !zonas.abonos) {
-    throw new Error('No se pudieron determinar las zonas de Cargos y Abonos en la tabla.');
+  if (!usaVLines) {
+    console.log('[PDF] Sin VLines → usando distancia mínima al encabezado (colMap):', JSON.stringify(header.colMap));
   }
 
   const transacciones = [];
@@ -329,8 +335,11 @@ async function parsearPDF(buffer) {
     const fila = filas[i];
     if (fila.page < header.headerPage) continue;
 
-    // Paso 3: Asignar por zona (no por distancia)
-    const celdas = asignarPorZona(fila, zonas);
+    // Paso 3: Asignar columna por zona (VLines) o por distancia mínima (fallback)
+    // Regla inviolable: la posición del elemento determina su tipo, nunca la IA.
+    const celdas = usaVLines
+      ? asignarPorZona(fila, zonas)
+      : asignarPorDistancia(fila, header.colMap);
 
     // ── Fecha (Regla 7) ──────────────────────────────────────────────────────
     const fechaTexto = (celdas.fecha || Object.values(celdas)[0] || '');

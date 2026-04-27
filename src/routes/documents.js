@@ -90,12 +90,14 @@ router.post('/process', authMiddleware, async (req, res) => {
     // ── 5. Preparar registros para Supabase ───────────────────────────────────
     const registros = transaccionesCategorizadas.map(t => ({
       empresa_id,
-      importacion_id: importacion_id || null,
+      importacion_id:          importacion_id || null,
       fecha_transaccion:       t.fecha_transaccion,
       descripcion_original:    t.descripcion_original,
       descripcion_normalizada: t.descripcion_normalizada,
+      numero_documento:        t.numero_documento || null,
       tipo:                    t.tipo,
       monto_original:          t.monto_original,
+      saldo_posterior:         t.saldo_posterior || null,
       moneda_original:         t.moneda_original || 'CLP',
       categoria_sugerida_ia:   t.categoria_sugerida_ia || null,
       confianza_deteccion:     t.confianza_deteccion || null,
