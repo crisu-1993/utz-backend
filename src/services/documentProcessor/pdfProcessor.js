@@ -1,22 +1,75 @@
-// Ver SKILL_CARTOLA.md para reglas de parsing de cartolas bancarias chilenas.
-// Este archivo implementa las 6 fases y 10 reglas definidas en esa skill.
+// Ver SKILL_CARTOLA.md para reglas completas de parsing.
+//
+// Arquitectura: 3 fases
+//   Fase 1 — Delimitar zona de movimientos (encabezado + footer)
+//   Fase 2 — Mapear coordenadas exactas de cada columna
+//   Fase 3 — Extraer campos usando el mapa (slice directo, sin inferencia)
 
 const pdfParse = require('pdf-parse');
 
-// ─── Patrones de fecha (Fase 3.1) ────────────────────────────────────────────
-// Orden de prioridad: DD/MM/YYYY > YYYY-MM-DD > DD/MM/YY
+// ─── Normalización de texto ───────────────────────────────────────────────────
+function normText(s) {
+  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+// ─── Parseo de montos en formato chileno (Reglas 5, 6, 8) ────────────────────
+// Regla 8: (1.234.567) = notación contable → valor absoluto
+// Regla 6: 1.234,56 = formato chileno → 1234.56
+// Regla 5: 1.234.567 = todos los puntos con 3 dígitos → miles → 1234567
+function parseMonto(s) {
+  if (!s || !s.trim()) return null;
+  let str = s.trim();
+
+  // Regla 8: notación contable entre paréntesis → tratar como positivo
+  if (str.startsWith('(') && str.endsWith(')')) str = str.slice(1, -1);
+
+  const limpio   = str.replace(/[$\s+]/g, '');
+  const negativo = limpio.startsWith('-');
+  const abs      = limpio.replace('-', '');
+
+  if (!abs || !/\d/.test(abs)) return null;
+
+  const contienePoint = abs.includes('.');
+  const contieneComa  = abs.includes(',');
+
+  let num;
+  if (contienePoint && contieneComa) {
+    // Regla 6: determinar cuál es el separador decimal por orden de aparición
+    const lastPoint = abs.lastIndexOf('.');
+    const lastComa  = abs.lastIndexOf(',');
+    num = lastComa > lastPoint
+      ? parseFloat(abs.replace(/\./g, '').replace(',', '.'))  // 1.234,56 → chileno
+      : parseFloat(abs.replace(/,/g, ''));                     // 1,234.56 → anglosajón
+  } else if (contieneComa && !contienePoint) {
+    const partes = abs.split(',');
+    num = (partes.length === 2 && partes[1].length <= 2)
+      ? parseFloat(abs.replace(',', '.'))   // 1234,56 → decimal
+      : parseFloat(abs.replace(/,/g, ''));  // separador de miles
+  } else {
+    // Regla 5: si TODOS los segmentos tras el primero tienen exactamente 3 dígitos
+    // → todos los puntos son separadores de miles (1.234.567 → 1234567)
+    const partes = abs.split('.');
+    const sonMiles = partes.length > 1 && partes.slice(1).every(p => p.length === 3);
+    num = sonMiles ? parseFloat(abs.replace(/\./g, '')) : parseFloat(abs);
+  }
+
+  if (isNaN(num) || num < 0) return null;
+  return negativo ? -Math.abs(num) : Math.abs(num);
+}
+
+// ─── Patrones de fecha (Fase 3 — Regla 7) ────────────────────────────────────
 const FECHA_RE = [
-  /(\d{2})[\/\-](\d{2})[\/\-](\d{4})/,   // DD/MM/YYYY o DD-MM-YYYY
-  /(\d{4})[\/\-](\d{2})[\/\-](\d{2})/,   // YYYY-MM-DD
-  /(\d{2})[\/\-](\d{2})[\/\-](\d{2})/,   // DD/MM/YY — Regla 7: YY≤50→20XX, YY>50→19XX
+  /(\d{2})[\/\-](\d{2})[\/\-](\d{4})/,  // DD/MM/YYYY o DD-MM-YYYY
+  /(\d{4})[\/\-](\d{2})[\/\-](\d{2})/,  // YYYY-MM-DD
+  /(\d{2})[\/\-](\d{2})[\/\-](\d{2})/,  // DD/MM/YY — Regla 7: YY≤50→20XX
 ];
 
-function normalizarFecha(match, fmt) {
-  if (fmt === 0) return `${match[3]}-${match[2].padStart(2,'0')}-${match[1].padStart(2,'0')}`;
-  if (fmt === 1) return `${match[1]}-${match[2]}-${match[3]}`;
+function normalizarFecha(m, fmt) {
+  if (fmt === 0) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  if (fmt === 1) return `${m[1]}-${m[2]}-${m[3]}`;
   if (fmt === 2) {
-    const year = parseInt(match[3]) > 50 ? `19${match[3]}` : `20${match[3]}`;
-    return `${year}-${match[2].padStart(2,'0')}-${match[1].padStart(2,'0')}`;
+    const y = parseInt(m[3]) > 50 ? `19${m[3]}` : `20${m[3]}`;
+    return `${y}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
   }
   return null;
 }
@@ -29,231 +82,189 @@ function extraerFecha(texto) {
   return null;
 }
 
-// ─── Parseo de montos en formato chileno (Fase 3.4) ──────────────────────────
-// Regla 5: 1.234 con 3 decimales = miles → 1234
-// Regla 6: 1.234,56 = formato chileno → 1234.56
-// Regla 8: (1.234) = notación contable → valor absoluto 1234
-function parseMonto(s) {
-  let str = s.trim();
+// ─── Aliases de columnas por tipo (Fase 1.1 de la skill) ─────────────────────
+const COL_ALIASES = {
+  fecha:       ['fecha'],
+  descripcion: ['descripcion', 'glosa', 'concepto', 'detalle', 'movimiento'],
+  docto:       ['docto', 'n° doc', 'n°doc', 'nro. doc', 'nro.doc', 'documento', 'nro', 'n°', 'num'],
+  cargos:      ['cargo', 'cargos', 'debito', 'debitos'],
+  abonos:      ['abono', 'abonos', 'credito', 'creditos'],
+  saldo:       ['saldo', 'balance', 'saldo final', 'saldo disponible'],
+};
 
-  // Regla 8: notación contable con paréntesis → valor absoluto
-  if (str.startsWith('(') && str.endsWith(')')) {
-    str = str.slice(1, -1);
-  }
+// ─── Marcadores de fin de zona de movimientos (Fase 1) ───────────────────────
+// Líneas que aparecen en el footer del PDF luego de las transacciones
+const FOOTER_RE = /\b(mensaje|imprimir|p[aá]gina siguiente|pie de p[aá]gina|total cargos|total abonos|saldo final al|saldo al \d)\b/;
 
-  const limpio   = str.replace(/[$\s+]/g, '');
-  const negativo = limpio.startsWith('-');
-  const abs      = limpio.replace('-', '');
+// ─── Filas a descartar aunque tengan fecha (Fase 6 de la skill) ──────────────
+const SKIP_DESC_RE = /^(saldo anterior|saldo inicial|total |subtotal|totales|resumen)\b/;
 
-  const contienePoint = abs.includes('.');
-  const contieneComa  = abs.includes(',');
-
-  let num;
-  if (contienePoint && contieneComa) {
-    const lastPoint = abs.lastIndexOf('.');
-    const lastComa  = abs.lastIndexOf(',');
-    num = lastComa > lastPoint
-      ? parseFloat(abs.replace(/\./g, '').replace(',', '.'))  // 1.234,56 → chileno
-      : parseFloat(abs.replace(/,/g, ''));                     // 1,234.56 → anglosajón
-  } else if (contieneComa && !contienePoint) {
-    const partes = abs.split(',');
-    num = (partes.length === 2 && partes[1].length <= 2)
-      ? parseFloat(abs.replace(',', '.'))
-      : parseFloat(abs.replace(/,/g, ''));
-  } else {
-    const partes = abs.split('.');
-    // Regla 5: si TODOS los segmentos tras el primero tienen exactamente 3 dígitos
-    // → todos los puntos son separadores de miles: 1.234.567 → 1234567, 150.000 → 150000
-    // Si algún segmento ≠ 3 dígitos → el punto es decimal: 1.50 → 1.5
-    const sonMiles = partes.length > 1 && partes.slice(1).every(p => p.length === 3);
-    num = sonMiles ? parseFloat(abs.replace(/\./g, '')) : parseFloat(abs);
-  }
-
-  if (isNaN(num)) return null;
-  return negativo ? -Math.abs(num) : Math.abs(num);
-}
-
-// Normaliza texto a minúsculas sin tildes (Fase 1.2)
-function normText(s) {
-  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-}
-
-// ─── Aliases de columnas por tipo (Fase 1.1) ─────────────────────────────────
-const COL_CARGO = ['cargo', 'cargos', 'debito', 'debitos'];
-const COL_ABONO = ['abono', 'abonos', 'credito', 'creditos'];
-const COL_SALDO = ['saldo', 'balance', 'saldo final', 'saldo disponible'];
-// Regla 1: Docto. NUNCA es un monto. Aliases variados según banco.
-const COL_DOCTO = ['docto', 'n° doc', 'n°doc', 'nro. doc', 'nro.doc', 'documento', 'nro', 'n°', 'num doc', 'num'];
-
-function buscarAlias(normLine, aliases) {
-  for (const alias of aliases) {
-    const idx = normLine.indexOf(alias);
-    if (idx !== -1) return idx;
-  }
-  return -1;
-}
-
-// ─── Detectar encabezado de tabla en el PDF (Fase 1) ─────────────────────────
-function detectarEncabezado(lineas) {
-  for (let i = 0; i < lineas.length; i++) {
-    const norm  = normText(lineas[i]);
-    const cargo = buscarAlias(norm, COL_CARGO);
-    const abono = buscarAlias(norm, COL_ABONO);
-    if (cargo !== -1 && abono !== -1) {
-      return {
-        headerIdx: i,
-        cargo,
-        abono,
-        saldo: buscarAlias(norm, COL_SALDO),
-        docto: buscarAlias(norm, COL_DOCTO),
-      };
-    }
-  }
-  return { headerIdx: -1, cargo: -1, abono: -1, saldo: -1, docto: -1 };
-}
-
-// ─── Heurística de tipo por palabras clave (Fase 6 — PDF desalineado) ────────
-// Regla 2: tipo por columna es prioritario. Este fallback aplica solo cuando
-// no hay encabezado detectado y el monto tampoco tiene signo.
+// ─── Heurística de tipo por descripción (fallback Fase 6) ────────────────────
 const KW_INGRESO = ['abono', 'deposito', 'transferencia recibida', 'credito', 'remuneracion', 'sueldo', 'devolucion'];
 const KW_EGRESO  = ['pago', 'cargo', 'debito', 'retiro', 'cuota', 'comision', 'impuesto', 'compra', 'giro'];
 
-function inferirTipoPorDescripcion(descripcion) {
-  const d = normText(descripcion);
+function inferirTipo(desc) {
+  const d = normText(desc);
   for (const kw of KW_INGRESO) { if (d.includes(kw)) return 'ingreso'; }
   for (const kw of KW_EGRESO)  { if (d.includes(kw)) return 'egreso'; }
-  return 'egreso'; // default conservador (Fase 3.3)
+  return 'egreso'; // default conservador
 }
 
-// ─── Descripciones de fila que deben descartarse (Fase 6) ────────────────────
-const SKIP_DESC_RE = /^(saldo anterior|saldo inicial|total |subtotal|totales|resumen)/;
+// ─── FASE 1: Detectar encabezado y límites de la zona de movimientos ─────────
+function detectarZona(lineas) {
+  let headerIdx = -1;
+  let colMap    = {};
 
-// ─── Parseo línea por línea (Fases 2–4) ──────────────────────────────────────
+  for (let i = 0; i < lineas.length; i++) {
+    const norm = normText(lineas[i]);
+    const mapa = {};
+
+    for (const [key, aliases] of Object.entries(COL_ALIASES)) {
+      for (const alias of aliases) {
+        const idx = norm.indexOf(alias);
+        if (idx !== -1) { mapa[key] = idx; break; }
+      }
+    }
+
+    // Mínimo requerido: fecha + cargos + abonos en la misma línea
+    if (mapa.fecha !== undefined && mapa.cargos !== undefined && mapa.abonos !== undefined) {
+      headerIdx = i;
+      colMap    = mapa;
+      break;
+    }
+  }
+
+  if (headerIdx === -1) return null;
+
+  // Buscar línea de footer para delimitar el fin de la zona de datos
+  let footerIdx = lineas.length;
+  for (let i = headerIdx + 1; i < lineas.length; i++) {
+    if (FOOTER_RE.test(normText(lineas[i]))) { footerIdx = i; break; }
+  }
+
+  return { headerIdx, footerIdx, colMap };
+}
+
+// ─── FASE 2: Crear zonas de columnas con midpoints ────────────────────────────
+// Cada zona va desde el midpoint con la columna anterior hasta el midpoint
+// con la siguiente. Esto tolera que los datos estén levemente desalineados
+// respecto al encabezado.
+function crearZonas(colMap) {
+  const sorted = Object.entries(colMap).sort(([, a], [, b]) => a - b);
+  const zonas  = {};
+
+  for (let i = 0; i < sorted.length; i++) {
+    const [key, pos] = sorted[i];
+    const prevPos = i > 0 ? sorted[i - 1][1] : 0;
+    const nextPos = i < sorted.length - 1 ? sorted[i + 1][1] : Infinity;
+
+    zonas[key] = {
+      start: i === 0 ? 0 : Math.floor((prevPos + pos) / 2),
+      end:   nextPos === Infinity ? Infinity : Math.floor((pos + nextPos) / 2),
+    };
+  }
+
+  return zonas;
+}
+
+// Extrae y limpia el texto de una zona en la línea original (sin trim global)
+function sliceZona(lineaRaw, zona) {
+  const end = zona.end === Infinity ? lineaRaw.length : Math.min(zona.end, lineaRaw.length);
+  return lineaRaw.slice(zona.start, end).trim();
+}
+
+// ─── FASE 3: Extraer transacciones usando el mapa de coordenadas ──────────────
 function parsearLineas(texto) {
   const lineas = texto.split('\n');
   const transacciones = [];
 
-  // Fase 1: detectar encabezado y posiciones de columnas
-  const enc = detectarEncabezado(lineas);
-  // midpoint entre Cargo y Abono para clasificar montos (Fase 3.3)
-  const midpoint = (enc.cargo !== -1 && enc.abono !== -1)
-    ? (enc.cargo + enc.abono) / 2
-    : -1;
+  // Fase 1: delimitar zona
+  const zona = detectarZona(lineas);
+  if (!zona) return transacciones; // sin encabezado → vacío (error en procesarPDF)
 
-  // Fases 2-4: procesar cada línea con fecha
-  for (let i = 0; i < lineas.length; i++) {
-    if (i === enc.headerIdx) continue;
+  // Fase 2: mapear coordenadas
+  const zonas = crearZonas(zona.colMap);
 
-    const lineaRaw  = lineas[i];   // sin trim → preserva posiciones de chars para columnas
+  // Fase 3: iterar solo las líneas dentro de la zona de movimientos
+  for (let i = zona.headerIdx + 1; i < zona.footerIdx; i++) {
+    const lineaRaw  = lineas[i];
     const lineaTrim = lineaRaw.trim();
     if (!lineaTrim) continue;
 
-    const fecha = extraerFecha(lineaTrim);
-    if (!fecha) continue;
+    // ── Fecha ─────────────────────────────────────────────────────────────────
+    // Leer desde la zona de fecha; si no hay zona detectada, los primeros 12 chars
+    const textoFecha = zonas.fecha
+      ? sliceZona(lineaRaw, zonas.fecha)
+      : lineaTrim.slice(0, 12);
+    const fecha = extraerFecha(textoFecha);
+    if (!fecha) continue;  // línea sin fecha → saltar
 
-    // ── Fase 3.2: numero_documento ────────────────────────────────────────────
-    // Regla 1: extraer desde zona Docto→Cargo como texto, nunca como monto.
-    // Soporta alfanumérico (DOC-12345) además de numérico puro (Regla 3.2).
+    // ── Numero de documento (Regla 1: NUNCA es monto, extraer como texto) ─────
     let numeroDocumento = null;
-    if (enc.docto !== -1 && enc.cargo !== -1) {
-      const desde  = Math.max(0, enc.docto - 2);
-      const hasta  = enc.cargo - 1;
-      const zona   = lineaRaw.slice(desde, hasta);
-      const mDocto = zona.match(/\w[\w\-]*/);  // captura 12345 o DOC-12345 o TRF-001
-      if (mDocto) numeroDocumento = mDocto[0];
+    if (zonas.docto) {
+      const textoDocto = sliceZona(lineaRaw, zonas.docto);
+      // Captura numérico puro (12345) o alfanumérico con prefijo (DOC-12345, TRF-001)
+      const m = textoDocto.match(/\w[\w\-]*/);
+      if (m) numeroDocumento = m[0];
     }
 
-    // ── Fase 3.3: montos con posición ─────────────────────────────────────────
-    // Filtrar zona pre-cargo descarta: fecha, Docto. y números de la descripción.
-    // Regla 9: números dentro de la descripción NO son montos.
-    // Regla 8: parseMonto ya maneja notación entre paréntesis.
-    const MONTO_POS_RE = /\([\d.,]+\)|[-+]?\$?\s*[\d.,]+(?:\.\d{1,2}|,\d{1,2})?/g;
-    const montosConPos = [];
-    let match;
-    while ((match = MONTO_POS_RE.exec(lineaRaw)) !== null) {
-      const v = parseMonto(match[0]);
-      if (v === null || v === 0) continue;
-      // Solo aceptar montos a partir de la columna Cargo (filtra fecha, docto, desc)
-      if (enc.cargo !== -1 && match.index < enc.cargo - 5) continue;
-      montosConPos.push({ val: v, pos: match.index });
-    }
+    // ── Descripción (Regla 9: no eliminar números de la zona de descripción) ──
+    let descripcion = zonas.descripcion
+      ? sliceZona(lineaRaw, zonas.descripcion)
+      : '';
 
-    if (montosConPos.length === 0) continue;
-
-    // Regla 4 (saldo = último número de la fila)
-    const saldoPosterior = montosConPos.length > 1
-      ? montosConPos[montosConPos.length - 1].val
-      : null;
-
-    // ── Fase 3.5: descripción ─────────────────────────────────────────────────
-    // Regla 9: solo eliminar números de la zona de montos (desde columna Cargo),
-    // NO de la zona de descripción. Preserva "CUOTA 3/12", "FACTURA 2026-001", etc.
-    let descripcion;
-    if (enc.cargo !== -1) {
-      // Tomar solo hasta el inicio de la zona de montos
-      const descEnd = enc.docto !== -1
-        ? Math.max(0, enc.docto - 2)   // si hay docto, la desc termina ahí
-        : Math.max(0, enc.cargo - 5);  // si no, la desc termina antes del cargo
-      const zonaDesc = lineaRaw.slice(0, descEnd);
-      descripcion = zonaDesc
-        .replace(FECHA_RE[0], '').replace(FECHA_RE[1], '').replace(FECHA_RE[2], '')
-        .replace(/\s+/g, ' ')
-        .trim();
-    } else {
-      // Sin info de columnas: eliminar todos los números como antes (fallback)
-      descripcion = lineaTrim
-        .replace(FECHA_RE[0], '').replace(FECHA_RE[1], '').replace(FECHA_RE[2], '')
-        .replace(/\([\d.,]+\)|[-+]?\$?\s*[\d.,]+(?:\.\d{1,2}|,\d{1,2})?/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-    }
-
-    // Regla 10: concatenar línea siguiente si no tiene fecha (descripción cortada)
-    if (descripcion.length < 5 && i + 1 < lineas.length) {
-      const next = lineas[i + 1].trim();
-      if (next && !extraerFecha(next)) {
-        descripcion = (descripcion + ' ' + next).trim();
-        i++;
+    // Regla 10: concatenar línea siguiente si continúa la descripción (sin fecha)
+    if (i + 1 < zona.footerIdx) {
+      const nextRaw  = lineas[i + 1];
+      const nextFecha = zonas.fecha
+        ? extraerFecha(sliceZona(nextRaw, zonas.fecha))
+        : extraerFecha(nextRaw.trim().slice(0, 12));
+      if (!nextFecha && nextRaw.trim()) {
+        // La línea siguiente no tiene fecha → es continuación de descripción
+        const nextDesc = zonas.descripcion
+          ? sliceZona(nextRaw, zonas.descripcion)
+          : nextRaw.trim();
+        if (nextDesc) { descripcion = (descripcion + ' ' + nextDesc).trim(); i++; }
       }
     }
 
-    // Fase 4: validación — descartar filas de totales/resúmenes (Fase 6)
     if (descripcion.length < 3) continue;
     if (SKIP_DESC_RE.test(normText(descripcion))) continue;
 
-    // ── Fase 3.3 + Fase 3.6: monto y tipo ────────────────────────────────────
-    // Candidatos = todos los montos excepto el saldo (último)
-    const candidatos = montosConPos.length > 1
-      ? montosConPos.slice(0, -1)
-      : montosConPos;
-
+    // ── Cargo → egreso (Regla 2) ──────────────────────────────────────────────
     let monto = null;
     let tipo  = null;
 
-    if (midpoint !== -1 && candidatos.length > 0) {
-      // Caso principal: detectar por posición de columna (Reglas 2 y 3)
-      const txn = candidatos[candidatos.length - 1];
-      monto = Math.abs(txn.val);
-      tipo  = txn.pos < midpoint ? 'egreso' : 'ingreso';
-
-    } else {
-      // Fallback 1: signo del valor (Fase 3.3 — caso sin columnas detectadas)
-      for (let j = candidatos.length - 1; j >= 0; j--) {
-        const v = candidatos[j].val;
-        if (v !== 0) {
-          monto = Math.abs(v);
-          tipo  = v < 0 ? 'egreso' : 'ingreso';
-          break;
-        }
-      }
-      // Fallback 2: único monto sin signo → heurística por palabras clave (Fase 6)
-      if (!tipo && montosConPos.length >= 1) {
-        monto = Math.abs(montosConPos[0].val);
-        tipo  = inferirTipoPorDescripcion(descripcion);
-      }
+    if (zonas.cargos) {
+      const v = parseMonto(sliceZona(lineaRaw, zonas.cargos));
+      if (v && v > 0) { monto = v; tipo = 'egreso'; }
     }
 
-    // Fase 4: validación final
+    // ── Abono → ingreso (Regla 3) ─────────────────────────────────────────────
+    if (!monto && zonas.abonos) {
+      const v = parseMonto(sliceZona(lineaRaw, zonas.abonos));
+      if (v && v > 0) { monto = v; tipo = 'ingreso'; }
+    }
+
+    // ── Fallback: si la zona estaba desalineada, buscar cualquier número numérico
+    // en la zona conjunta cargos+abonos e inferir tipo por descripción
+    if (!monto && zonas.cargos && zonas.abonos) {
+      const zonaMontos = {
+        start: zonas.cargos.start,
+        end:   zonas.abonos.end,
+      };
+      const textoMontos = sliceZona(lineaRaw, zonaMontos);
+      const v = parseMonto(textoMontos.replace(/\s+/g, '').split(/\s/)[0] || '');
+      if (v && v > 0) { monto = v; tipo = inferirTipo(descripcion); }
+    }
+
+    // ── Saldo posterior (Regla 4) ─────────────────────────────────────────────
+    let saldoPosterior = null;
+    if (zonas.saldo) {
+      saldoPosterior = parseMonto(sliceZona(lineaRaw, zonas.saldo));
+    }
+
+    // ── Validación final (Fase 4) ─────────────────────────────────────────────
     if (!monto || !tipo) continue;
 
     transacciones.push({
@@ -289,7 +300,11 @@ async function procesarPDF(buffer) {
   const transacciones = parsearLineas(texto);
 
   if (transacciones.length === 0) {
-    throw new Error('No se encontraron transacciones en el PDF. Verifique que sea una cartola bancaria con texto seleccionable.');
+    throw new Error(
+      'No se encontraron transacciones en el PDF. ' +
+      'Verifique que sea una cartola bancaria chilena con texto seleccionable ' +
+      'y que contenga columnas Fecha, Cargos y Abonos.'
+    );
   }
 
   return transacciones;
