@@ -178,12 +178,36 @@ function parsearLineas(texto) {
   const lineas = texto.split('\n');
   const transacciones = [];
 
+  // ── DEBUG TEMPORAL ──────────────────────────────────────────────────────────
+  console.log('\n[PDF DEBUG] Total líneas extraídas por pdf-parse:', lineas.length);
+  console.log('[PDF DEBUG] Primeras 30 líneas raw:');
+  lineas.slice(0, 30).forEach((l, i) =>
+    console.log(`  [${String(i).padStart(2,'0')}] ${JSON.stringify(l)}`)
+  );
+  // ── FIN DEBUG ───────────────────────────────────────────────────────────────
+
   // Fase 1: delimitar zona
   const zona = detectarZona(lineas);
+
+  // ── DEBUG TEMPORAL ──────────────────────────────────────────────────────────
+  if (!zona) {
+    console.log('[PDF DEBUG] ✗ No se detectó línea de encabezado.');
+    console.log('[PDF DEBUG] Aliases buscados — cargos:', COL_ALIASES.cargos, '| abonos:', COL_ALIASES.abonos, '| fecha:', COL_ALIASES.fecha);
+  } else {
+    console.log(`[PDF DEBUG] ✓ Encabezado en línea ${zona.headerIdx}:`, JSON.stringify(lineas[zona.headerIdx]));
+    console.log('[PDF DEBUG] colMap detectado:', zona.colMap);
+    console.log(`[PDF DEBUG] Zona de movimientos: líneas ${zona.headerIdx + 1} → ${zona.footerIdx - 1} (${zona.footerIdx - zona.headerIdx - 1} líneas)`);
+    if (zona.footerIdx < lineas.length) {
+      console.log(`[PDF DEBUG] Footer detectado en línea ${zona.footerIdx}:`, JSON.stringify(lineas[zona.footerIdx]));
+    }
+  }
+  // ── FIN DEBUG ───────────────────────────────────────────────────────────────
+
   if (!zona) return transacciones; // sin encabezado → vacío (error en procesarPDF)
 
   // Fase 2: mapear coordenadas
   const zonas = crearZonas(zona.colMap);
+  console.log('[PDF DEBUG] Zonas calculadas:', JSON.stringify(zonas));
 
   // Fase 3: iterar solo las líneas dentro de la zona de movimientos
   for (let i = zona.headerIdx + 1; i < zona.footerIdx; i++) {
