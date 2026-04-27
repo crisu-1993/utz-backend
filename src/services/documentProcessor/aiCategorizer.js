@@ -42,6 +42,8 @@ EGRESOS:
 - gastos_financieros: Comisiones bancarias, intereses préstamos, cuotas leasing
 - otros_gastos: Gastos que no encajan en las categorías anteriores
 
+IMPORTANTE: La columna 'Docto.' o 'Nro. Documento' es un identificador interno, NO es un monto. Los únicos montos válidos son los de las columnas 'Cargos' y 'Abonos'.
+
 Responde SIEMPRE con un JSON válido en el formato especificado. No agregues explicaciones fuera del JSON.`;
 
 // Envía un lote de transacciones a Claude y retorna las categorizadas
