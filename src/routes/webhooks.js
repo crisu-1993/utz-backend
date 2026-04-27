@@ -92,16 +92,16 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
       archivo_origen:          nombreArchivo,
     }));
 
-    // 6. Insertar en lotes de 100
-    const BATCH = 100;
+    // 6. Insertar uno a uno para identificar el registro que falla
     let insertados = 0;
-    for (let i = 0; i < registros.length; i += BATCH) {
-      const lote = registros.slice(i, i + BATCH);
-      console.log('[webhook] muestra lote:', JSON.stringify(lote.slice(0,3).map(t => ({ monto: t.monto_original, confianza: t.confianza_deteccion }))));
-      console.log('[webhook] primer registro lote:', JSON.stringify(lote[0]));
-      const { error } = await supabase.from('transacciones_historicas').insert(lote);
-      if (error) throw new Error(`Error guardando transacciones: ${error.message}`);
-      insertados += lote.length;
+    for (const registro of registros) {
+      const { error } = await supabase.from('transacciones_historicas').insert([registro]);
+      if (error) {
+        console.log('[webhook] falla registro:', JSON.stringify({ monto: registro.monto_original, confianza: registro.confianza_deteccion, desc: registro.descripcion_original }));
+        console.log('[webhook] error:', error.message);
+      } else {
+        insertados++;
+      }
     }
 
     // 7. Calcular totales
