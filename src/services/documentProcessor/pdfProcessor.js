@@ -81,30 +81,74 @@ function parseMonto(s) {
   return negativo ? -Math.abs(num) : Math.abs(num);
 }
 
+// Normaliza texto quitando tildes y pasando a minúsculas
+function normText(s) {
+  return s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 // ─── Estrategia de parseo línea por línea ────────────────────────────────────
 function parsearLineas(texto) {
-  const lineas = texto.split('\n').map(l => l.trim()).filter(Boolean);
+  const lineas = texto.split('\n');
   const transacciones = [];
 
+  // ── Paso 1: detectar posición de columnas Cargos / Abonos en el encabezado ──
+  let cargosPos = -1;
+  let abonosPos = -1;
+  let headerIdx = -1;
+
   for (let i = 0; i < lineas.length; i++) {
-    const linea = lineas[i];
-    const fecha = extraerFecha(linea);
+    const norm = normText(lineas[i]);
+    const ci = norm.indexOf('cargo');  // cubre 'cargo' y 'cargos'
+    const ai = norm.indexOf('abono');  // cubre 'abono' y 'abonos'
+    if (ci !== -1 && ai !== -1) {
+      cargosPos = ci;
+      abonosPos = ai;
+      headerIdx = i;
+      break;
+    }
+  }
+
+  // Punto medio entre las dos columnas: monto antes → egreso, después → ingreso
+  const midpoint = (cargosPos !== -1 && abonosPos !== -1)
+    ? (cargosPos + abonosPos) / 2
+    : -1;
+
+  // ── Paso 2: parsear cada línea de transacción ─────────────────────────────
+  for (let i = 0; i < lineas.length; i++) {
+    if (i === headerIdx) continue;
+
+    const lineaRaw = lineas[i]; // sin trim para preservar posiciones de caracteres
+    const lineaTrim = lineaRaw.trim();
+    if (!lineaTrim) continue;
+
+    const fecha = extraerFecha(lineaTrim);
     if (!fecha) continue;
 
-    // Extraer todos los montos de la línea
-    const montos = [...(linea.matchAll(MONTO_RE) || [])].map(m => m[0]);
-    if (montos.length === 0) continue;
+    // Extraer montos con su posición en la línea original
+    const MONTO_POS_RE = /[-+]?\$?\s*[\d.,]+(?:\.\d{1,2}|,\d{1,2})?/g;
+    const montosConPos = [];
+    let match;
+    while ((match = MONTO_POS_RE.exec(lineaRaw)) !== null) {
+      const v = parseMonto(match[0]);
+      if (v === null || v === 0) continue;
+      // Si hay columnas detectadas, ignorar números antes de la zona de montos
+      // (descarta componentes de fecha y números en la descripción)
+      if (cargosPos !== -1 && match.index < cargosPos - 5) continue;
+      montosConPos.push({ val: v, pos: match.index });
+    }
 
-    // Intentar combinar con la línea siguiente si la descripción es corta
-    let descripcion = linea
+    if (montosConPos.length === 0) continue;
+
+    // Construir descripción eliminando fecha y montos
+    let descripcion = lineaTrim
       .replace(FECHA_RE[0], '').replace(FECHA_RE[1], '').replace(FECHA_RE[2], '')
-      .replace(MONTO_RE, '')
+      .replace(/[-+]?\$?\s*[\d.,]+(?:\.\d{1,2}|,\d{1,2})?/g, '')
       .replace(/\s+/g, ' ')
       .trim();
 
     if (descripcion.length < 5 && i + 1 < lineas.length) {
-      const next = lineas[i + 1];
-      if (!extraerFecha(next)) {
+      const next = lineas[i + 1].trim();
+      if (next && !extraerFecha(next)) {
         descripcion = (descripcion + ' ' + next).trim();
         i++;
       }
@@ -112,36 +156,45 @@ function parsearLineas(texto) {
 
     if (descripcion.length < 3) continue;
 
-    // Lógica para determinar tipo desde los montos disponibles
-    // Generalmente: último monto = saldo, penúltimo = transacción
     let monto = null;
     let tipo  = null;
 
-    if (montos.length >= 2) {
-      // Buscar el monto de la transacción (ignorar el saldo final)
-      for (let j = montos.length - 2; j >= 0; j--) {
-        const v = parseMonto(montos[j]);
-        if (v !== null && v !== 0) {
-          monto = Math.abs(v);
-          tipo  = v < 0 ? 'egreso' : 'ingreso';
-          break;
-        }
+    if (midpoint !== -1) {
+      // ── Detección por columna ────────────────────────────────────────────
+      // El último monto es el saldo: ignorarlo si hay más de uno
+      const candidatos = montosConPos.length > 1
+        ? montosConPos.slice(0, -1)
+        : montosConPos;
+
+      if (candidatos.length > 0) {
+        const txn = candidatos[candidatos.length - 1];
+        monto = Math.abs(txn.val);
+        tipo  = txn.pos < midpoint ? 'egreso' : 'ingreso';
       }
-      // Si no se determinó tipo por signo, el último monto usable define tipo
-      if (!tipo && montos.length === 2) {
-        const v = parseMonto(montos[0]);
-        if (v !== null) {
-          monto = Math.abs(v);
-          // Heurística: si el saldo aumentó respecto al monto → ingreso
-          const saldo = parseMonto(montos[1]);
-          tipo = saldo !== null && saldo > 0 ? 'ingreso' : 'egreso';
+
+    } else {
+      // ── Fallback: signo del monto o heurística de saldo ─────────────────
+      if (montosConPos.length >= 2) {
+        for (let j = montosConPos.length - 2; j >= 0; j--) {
+          const v = montosConPos[j].val;
+          if (v !== 0) {
+            monto = Math.abs(v);
+            tipo  = v < 0 ? 'egreso' : 'ingreso';
+            break;
+          }
         }
-      }
-    } else if (montos.length === 1) {
-      const v = parseMonto(montos[0]);
-      if (v !== null && v !== 0) {
-        monto = Math.abs(v);
-        tipo  = 'egreso'; // sin contexto, default egreso
+        if (!tipo) {
+          const v     = montosConPos[0].val;
+          const saldo = montosConPos[montosConPos.length - 1].val;
+          monto = Math.abs(v);
+          tipo  = (saldo !== null && saldo > 0) ? 'ingreso' : 'egreso';
+        }
+      } else {
+        const v = montosConPos[0].val;
+        if (v !== 0) {
+          monto = Math.abs(v);
+          tipo  = 'egreso'; // sin contexto suficiente, default egreso
+        }
       }
     }
 
@@ -153,7 +206,7 @@ function parsearLineas(texto) {
       descripcion_normalizada: descripcion.toLowerCase().replace(/\s+/g, ' ').trim(),
       tipo,
       monto_original:          monto,
-      moneda_original:         'CLP',
+      moneda_origen:           'CLP',
       fuente:                  'cartola_banco',
     });
   }
