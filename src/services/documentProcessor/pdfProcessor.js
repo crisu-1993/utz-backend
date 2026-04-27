@@ -84,12 +84,12 @@ function extraerFecha(texto) {
 
 // ─── Aliases de columnas por tipo (Fase 1.1 de la skill) ─────────────────────
 const COL_ALIASES = {
-  fecha:       ['fecha'],
-  descripcion: ['descripcion', 'glosa', 'concepto', 'detalle', 'movimiento'],
-  docto:       ['docto', 'n° doc', 'n°doc', 'nro. doc', 'nro.doc', 'documento', 'nro', 'n°', 'num'],
-  cargos:      ['cargo', 'cargos', 'debito', 'debitos'],
-  abonos:      ['abono', 'abonos', 'credito', 'creditos'],
-  saldo:       ['saldo', 'balance', 'saldo final', 'saldo disponible'],
+  fecha:       ['fecha', 'fec', 'fec.', 'dt.', 'f.'],
+  descripcion: ['descripcion', 'narracion', 'glosa', 'concepto', 'detalle', 'movimiento', 'texto'],
+  docto:       ['docto', 'n° doc', 'n°doc', 'nro. doc', 'nro.doc', 'documento', 'nro', 'n° ref', 'nº ref', 'referencia', 'ref', 'folio', 'n°', 'num'],
+  cargos:      ['cargo', 'cargos', 'debito', 'debitos', 'retiro', 'egreso', 'db'],
+  abonos:      ['abono', 'abonos', 'credito', 'creditos', 'deposito', 'depositos', 'ingreso', 'cr'],
+  saldo:       ['saldo', 'balance', 'saldo final', 'saldo disponible', 'saldo actual', 'sdo'],
 };
 
 // ─── Marcadores de fin de zona de movimientos (Fase 1) ───────────────────────
