@@ -159,32 +159,8 @@ function procesarExcel(buffer, filename = '') {
     let monto = null;
     let tipo  = null;
 
-    if (tieneMontoUnico) {
-      // Columna única de monto — detectar tipo por signo o por columna separada de cargo/abono
-      const rawMonto = getCell(colMonto);
-      const rawNum   = typeof rawMonto === 'number' ? rawMonto : parseFloat(
-        String(rawMonto ?? '').replace(/\./g, '').replace(',', '.')
-      );
-
-      if (!isNaN(rawNum) && rawNum !== 0) {
-        monto = Math.abs(rawNum);
-        tipo  = rawNum < 0 ? 'egreso' : 'ingreso';
-      }
-
-      // Si hay columna de cargo además, usar para definir tipo
-      if (colCargo !== -1) {
-        const rawCargo = getCell(colCargo);
-        const cargo    = parseMonto(rawCargo);
-        if (cargo && cargo > 0) tipo = 'egreso';
-      }
-      if (colAbono !== -1) {
-        const rawAbono = getCell(colAbono);
-        const abono    = parseMonto(rawAbono);
-        if (abono && abono > 0) tipo = 'ingreso';
-      }
-
-    } else {
-      // Columnas separadas de cargo y abono
+    // Prioridad 1: columnas Cargo/Abono (fuente más confiable de tipo)
+    if (colCargo !== -1 || colAbono !== -1) {
       const cargo = colCargo !== -1 ? parseMonto(getCell(colCargo)) : null;
       const abono = colAbono !== -1 ? parseMonto(getCell(colAbono)) : null;
 
@@ -194,6 +170,19 @@ function procesarExcel(buffer, filename = '') {
       } else if (abono && abono > 0) {
         monto = abono;
         tipo  = 'ingreso';
+      }
+    }
+
+    // Prioridad 2: columna única de monto con signo (fallback)
+    if (!monto && colMonto !== -1) {
+      const rawMonto = getCell(colMonto);
+      const rawNum   = typeof rawMonto === 'number' ? rawMonto : parseFloat(
+        String(rawMonto ?? '').replace(/\./g, '').replace(',', '.')
+      );
+
+      if (!isNaN(rawNum) && rawNum !== 0) {
+        monto = Math.abs(rawNum);
+        tipo  = rawNum < 0 ? 'egreso' : 'ingreso';
       }
     }
 
