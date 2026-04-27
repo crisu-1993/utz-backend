@@ -42,7 +42,10 @@ EGRESOS:
 - gastos_financieros: Comisiones bancarias, intereses préstamos, cuotas leasing
 - otros_gastos: Gastos que no encajan en las categorías anteriores
 
-IMPORTANTE: La columna 'Docto.' o 'Nro. Documento' es un identificador interno, NO es un monto. Los únicos montos válidos son los de las columnas 'Cargos' y 'Abonos'.
+IMPORTANTE:
+- Los registros en columna 'Cargos' son egresos (tipo: 'egreso', monto positivo).
+- Los registros en columna 'Abonos' son ingresos (tipo: 'ingreso', monto positivo).
+- NUNCA uses el campo Docto. como monto. La columna 'Docto.' o 'Nro. Documento' es un identificador interno, no un monto.
 
 Responde SIEMPRE con un JSON válido en el formato especificado. No agregues explicaciones fuera del JSON.`;
 

@@ -73,24 +73,31 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
     const categorizadas = await categorizarTransacciones(transacciones);
     console.log('[webhook] Categorización completada');
 
-    // 5. Preparar registros
-    const registros = categorizadas.map(t => ({
-      empresa_id:              empresaId,
-      importacion_id:          importacionId,
-      fecha_transaccion:       t.fecha_transaccion,
-      descripcion_original:    t.descripcion_original,
-      descripcion_normalizada: t.descripcion_normalizada,
-      tipo:                    t.tipo,
-      monto_original:          Math.round(t.monto_original * 100) / 100,
-      moneda_original:         t.moneda_original || 'CLP',
-      categoria_sugerida_ia:   t.categoria_sugerida_ia || null,
-      confianza_deteccion:     t.confianza_deteccion != null
-                                 ? Math.min(0.999, Math.max(0, t.confianza_deteccion > 1 ? t.confianza_deteccion / 100 : t.confianza_deteccion))
-                                 : null,
-      estado:                  'pendiente_revision',
-      fuente:                  t.fuente || 'cartola_banco',
-      archivo_origen:          nombreArchivo,
-    }));
+    // 5. Preparar registros (descartar transacciones con monto inválido)
+    const registros = categorizadas.flatMap(t => {
+      const monto = typeof t.monto_original === 'number' ? t.monto_original : parseFloat(t.monto_original);
+      if (isNaN(monto)) {
+        console.log('[webhook] descartando registro con monto inválido:', JSON.stringify({ desc: t.descripcion_original, monto_raw: t.monto_original }));
+        return [];
+      }
+      return [{
+        empresa_id:              empresaId,
+        importacion_id:          importacionId,
+        fecha_transaccion:       t.fecha_transaccion,
+        descripcion_original:    t.descripcion_original,
+        descripcion_normalizada: t.descripcion_normalizada,
+        tipo:                    t.tipo,
+        monto_original:          monto,
+        moneda_original:         t.moneda_original || 'CLP',
+        categoria_sugerida_ia:   t.categoria_sugerida_ia || null,
+        confianza_deteccion:     t.confianza_deteccion != null
+                                   ? Math.min(0.999, Math.max(0, t.confianza_deteccion > 1 ? t.confianza_deteccion / 100 : t.confianza_deteccion))
+                                   : null,
+        estado:                  'pendiente_revision',
+        fuente:                  t.fuente || 'cartola_banco',
+        archivo_origen:          nombreArchivo,
+      }];
+    });
 
     // 6. Insertar uno a uno para identificar el registro que falla
     let insertados = 0;
