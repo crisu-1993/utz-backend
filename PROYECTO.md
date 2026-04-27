@@ -165,3 +165,17 @@ curl http://localhost:3001/api/documents/results/00000000-0000-0000-0000-0000000
 1. **Revisión de transacciones:** Implementar `PATCH /api/documents/transactions/:id` para que el usuario corrija categorías (cambiar `estado` de `pendiente_revision` a `revisado`).
 
 2. **Proteger resumen y score:** Si se requiere auth también en esos endpoints, agregar `authMiddleware` y leer `empresa_id` desde `req.auth`.
+
+---
+
+## Sesión 2026-04-26
+
+- **Fix:** `.catch()` reemplazado por `try/catch` en `src/routes/webhooks.js`
+- **Fix:** cliente Supabase usa `SUPABASE_SERVICE_KEY` para bypassear RLS
+- **Fix:** `pdf-parse` downgradeado a v1.1.1 (v2.x cambió la API)
+- **Fix:** búsqueda de empresa por `id` (no `owner_id`) en tabla `empresas`
+- **Fix:** `aiCategorizer.js` instruye que Cargos=egreso, Abonos=ingreso, Docto. no es monto
+- **Fix:** insert de transacciones uno a uno para evitar fallo total del lote
+- **Estado:** 101 transacciones se guardan correctamente, pero `tipo` siempre llega como `'ingreso'`
+- **Pendiente:** corregir identificación de egresos en `aiCategorizer.js`
+- **Nota:** transacciones con montos inusuales son consideradas mal categorizadas, no se eliminan
