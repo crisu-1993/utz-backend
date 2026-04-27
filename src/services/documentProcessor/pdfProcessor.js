@@ -1,63 +1,69 @@
+// pdfProcessor.js — Pipeline de 3 pasos con pdf2json
+//
+// Paso 1 — Extracción pura: pdf2json entrega texto + líneas verticales (VLines)
+// Paso 2 — Fronteras exactas: las VLines de la tabla son los bordes de columna.
+//           Si no hay VLines, fallback con midpoints entre los x del encabezado.
+// Paso 3 — Regla inviolable:
+//           zona Cargos → tipo: 'egreso'   (NUNCA lo decide la IA)
+//           zona Abonos → tipo: 'ingreso'  (NUNCA lo decide la IA)
+//           zona Docto. → numero_documento (NUNCA monto)
+//
 // Ver SKILL_CARTOLA.md para reglas completas de parsing.
-//
-// Extracción: pdfreader — da coordenadas {x, y} reales por elemento de texto,
-// equivalente a pdfplumber en Python. No más heurísticas de caracteres.
-//
-// Arquitectura:
-//   Fase 1 — Extraer items {page, x, y, text} del PDF con posicionamiento real
-//   Fase 2 — Agrupar por fila (misma página + y similar) → tabla de filas
-//   Fase 3 — Detectar fila de encabezado → colMap { columna: x_real }
-//   Fase 4 — Para cada fila de datos: asignar cada item al colMap por x más cercana
-//   Fase 5 — Parsear cada celda según su columna (Cargo→egreso, Abono→ingreso, etc.)
 
-const { PdfReader } = require('pdfreader');
+const PDFParser = require('pdf2json');
 
 // ─── Normalización de texto ───────────────────────────────────────────────────
 function normText(s) {
-  return String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return String(s)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')   // quitar tildes
+    .replace(/[$.()]/g, '')            // ignorar puntuación
+    .trim();
 }
 
-// ─── Parseo de montos en formato chileno (Reglas 5, 6, 8) ────────────────────
+// ─── Parseo de montos en formato chileno (Reglas 5, 6, 8 de la skill) ────────
 function parseMonto(s) {
   if (!s || !s.trim()) return null;
   let str = s.trim();
-  if (str.startsWith('(') && str.endsWith(')')) str = str.slice(1, -1); // Regla 8
+  // Notación contable: (150.000) → negativo → valor absoluto (Regla 8)
+  if (str.startsWith('(') && str.endsWith(')')) str = str.slice(1, -1);
   const limpio   = str.replace(/[$\s+]/g, '');
   const negativo = limpio.startsWith('-');
   const abs      = limpio.replace('-', '');
   if (!abs || !/\d/.test(abs)) return null;
 
-  const contienePoint = abs.includes('.');
-  const contieneComa  = abs.includes(',');
+  const tienePoint = abs.includes('.');
+  const tieneComa  = abs.includes(',');
   let num;
 
-  if (contienePoint && contieneComa) {
+  if (tienePoint && tieneComa) {
     const lp = abs.lastIndexOf('.');
     const lc = abs.lastIndexOf(',');
     num = lc > lp
-      ? parseFloat(abs.replace(/\./g, '').replace(',', '.'))
-      : parseFloat(abs.replace(/,/g, ''));
-  } else if (contieneComa && !contienePoint) {
-    const p = abs.split(',');
-    num = (p.length === 2 && p[1].length <= 2)
+      ? parseFloat(abs.replace(/\./g, '').replace(',', '.'))   // formato chileno
+      : parseFloat(abs.replace(/,/g, ''));                     // formato anglosajón
+  } else if (tieneComa && !tienePoint) {
+    const partes = abs.split(',');
+    num = (partes.length === 2 && partes[1].length <= 2)
       ? parseFloat(abs.replace(',', '.'))
       : parseFloat(abs.replace(/,/g, ''));
   } else {
-    // Regla 5: todos los segmentos tras el primero con 3 dígitos → miles
-    const p = abs.split('.');
-    const sonMiles = p.length > 1 && p.slice(1).every(s => s.length === 3);
+    // Regla 5: si todos los segmentos tras el primero tienen 3 dígitos → miles
+    const partes = abs.split('.');
+    const sonMiles = partes.length > 1 && partes.slice(1).every(p => p.length === 3);
     num = sonMiles ? parseFloat(abs.replace(/\./g, '')) : parseFloat(abs);
   }
 
   if (isNaN(num) || num < 0) return null;
-  return negativo ? -Math.abs(num) : Math.abs(num);
+  return Math.abs(num);
 }
 
-// ─── Patrones de fecha (Regla 7) ─────────────────────────────────────────────
+// ─── Patrones de fecha (Regla 7 de la skill) ─────────────────────────────────
 const FECHA_RE = [
-  /(\d{2})[\/\-](\d{2})[\/\-](\d{4})/,
-  /(\d{4})[\/\-](\d{2})[\/\-](\d{2})/,
-  /(\d{2})[\/\-](\d{2})[\/\-](\d{2})/,
+  /(\d{2})[\/\-](\d{2})[\/\-](\d{4})/,   // DD/MM/YYYY o DD-MM-YYYY
+  /(\d{4})[\/\-](\d{2})[\/\-](\d{2})/,   // YYYY-MM-DD
+  /(\d{2})[\/\-](\d{2})[\/\-](\d{2})/,   // DD/MM/YY
 ];
 
 function normalizarFecha(m, fmt) {
@@ -79,20 +85,21 @@ function extraerFecha(texto) {
 
 // ─── Aliases de columnas (Fase 1.1 de la skill) ──────────────────────────────
 const COL_ALIASES = {
-  fecha:       ['fecha', 'fec', 'fec.', 'dt.', 'f.'],
+  fecha:       ['fecha', 'fec', 'fec.', 'dt.', 'f.', 'date'],
   descripcion: ['descripcion', 'narracion', 'glosa', 'concepto', 'detalle', 'movimiento', 'texto'],
-  docto:       ['docto', 'n° doc', 'n°doc', 'nro. doc', 'nro.doc', 'documento', 'nro', 'n° ref', 'nº ref', 'referencia', 'ref', 'folio', 'n°', 'num'],
-  cargos:      ['cargo', 'cargos', 'debito', 'debitos', 'retiro', 'egreso', 'db'],
-  abonos:      ['abono', 'abonos', 'credito', 'creditos', 'deposito', 'depositos', 'ingreso', 'cr'],
+  docto:       ['docto', 'n doc', 'ndoc', 'nro doc', 'nrodoc', 'documento', 'nro', 'n ref', 'referencia', 'ref', 'folio', 'n', 'num'],
+  cargos:      ['cargo', 'cargos', 'debito', 'debitos', 'retiro', 'egreso', 'db', 'debitos', 'debit', 'debits'],
+  abonos:      ['abono', 'abonos', 'credito', 'creditos', 'deposito', 'depositos', 'ingreso', 'cr', 'creditos', 'credit', 'credits'],
   saldo:       ['saldo', 'balance', 'saldo final', 'saldo disponible', 'saldo actual', 'sdo'],
 };
 
 // Filas a descartar aunque tengan fecha
 const SKIP_DESC_RE = /^(saldo anterior|saldo inicial|total |subtotal|totales|resumen)\b/;
 
-// Heurística de tipo por palabras clave (último fallback)
+// Heurística de tipo por palabras clave (último fallback — nunca es el camino principal)
 const KW_INGRESO = ['abono', 'deposito', 'transferencia recibida', 'credito', 'remuneracion', 'sueldo', 'devolucion'];
 const KW_EGRESO  = ['pago', 'cargo', 'debito', 'retiro', 'cuota', 'comision', 'impuesto', 'compra', 'giro'];
+
 function inferirTipo(desc) {
   const d = normText(desc);
   for (const kw of KW_INGRESO) { if (d.includes(kw)) return 'ingreso'; }
@@ -100,28 +107,69 @@ function inferirTipo(desc) {
   return 'egreso';
 }
 
-// ─── FASE 1: Extraer items con posicionamiento real ───────────────────────────
-function extraerItems(buffer) {
+// ─── PASO 1: Extracción pura con pdf2json ─────────────────────────────────────
+// Devuelve { pdfData } con la estructura completa incluyendo VLines.
+function extraerDatosCrudos(buffer) {
   return new Promise((resolve, reject) => {
-    const items = [];   // { page, x, y, text }
-    let paginaActual = 1;
-
-    new PdfReader().parseBuffer(buffer, (err, item) => {
-      if (err) return reject(new Error(`pdfreader error: ${err.message || err}`));
-      if (!item) return resolve(items);           // fin del PDF
-      if (item.page) paginaActual = item.page;   // nueva página
-      if (item.text) {
-        items.push({ page: paginaActual, x: item.x, y: item.y, text: item.text });
-      }
-    });
+    const parser = new PDFParser(null, 1);
+    parser.on('pdfParser_dataReady', data => resolve(data));
+    parser.on('pdfParser_dataError', err =>
+      reject(new Error(`pdf2json: ${err.parserError || JSON.stringify(err)}`))
+    );
+    parser.parseBuffer(buffer);
   });
 }
 
-// ─── FASE 2: Agrupar items en filas por página + y similar ───────────────────
-function agruparEnFilas(items, tolerancia = 0.4) {
-  // Clave de fila: "página_y_representativo"
-  const mapa = [];  // [{ page, y, items: [{x, text}] }]
+// ─── Extraer items de texto de las páginas de pdf2json ────────────────────────
+// Devuelve: [{ page, x, y, text }]
+function extraerItems(pdfData) {
+  const items = [];
+  pdfData.Pages.forEach((page, pageIdx) => {
+    for (const txt of (page.Texts || [])) {
+      const text = txt.R
+        .map(r => decodeURIComponent(r.T))
+        .join('')
+        .trim();
+      if (text) {
+        items.push({ page: pageIdx + 1, x: txt.x, y: txt.y, text });
+      }
+    }
+  });
+  return items;
+}
 
+// ─── PASO 2a: Detectar líneas verticales de la tabla ─────────────────────────
+// Devuelve array de x ordenados (fronteras exactas) o [] si no hay VLines útiles.
+function detectarVLines(pdfData, alturaMinima = 5) {
+  const xs = [];
+  for (const page of pdfData.Pages) {
+    for (const vl of (page.VLines || [])) {
+      // Solo líneas que cubran una altura significativa (son separadores de tabla)
+      if ((vl.l || 0) >= alturaMinima) {
+        xs.push(vl.x);
+      }
+    }
+  }
+  if (xs.length < 2) return [];
+
+  // Deduplicar: agrupar xs muy cercanos (tolerancia 0.5 unidades) y tomar el promedio
+  xs.sort((a, b) => a - b);
+  const grupos = [[xs[0]]];
+  for (let i = 1; i < xs.length; i++) {
+    if (xs[i] - grupos[grupos.length - 1][0] < 0.5) {
+      grupos[grupos.length - 1].push(xs[i]);
+    } else {
+      grupos.push([xs[i]]);
+    }
+  }
+  const fronteras = grupos.map(g => g.reduce((a, b) => a + b, 0) / g.length);
+  console.log(`[PDF] VLines detectadas: ${fronteras.map(x => x.toFixed(2)).join(', ')}`);
+  return fronteras;
+}
+
+// ─── PASO 2b: Agrupar items en filas (misma página + y similar) ───────────────
+function agruparEnFilas(items, tolerancia = 0.4) {
+  const mapa = [];
   for (const item of items) {
     const fila = mapa.find(
       f => f.page === item.page && Math.abs(f.y - item.y) <= tolerancia
@@ -132,15 +180,12 @@ function agruparEnFilas(items, tolerancia = 0.4) {
       mapa.push({ page: item.page, y: item.y, items: [{ x: item.x, text: item.text }] });
     }
   }
-
-  // Ordenar: por página luego por y; dentro de cada fila, por x
   mapa.sort((a, b) => a.page !== b.page ? a.page - b.page : a.y - b.y);
   mapa.forEach(f => f.items.sort((a, b) => a.x - b.x));
-
   return mapa;
 }
 
-// ─── FASE 3: Detectar fila de encabezado → colMap { columna: x_real } ────────
+// ─── PASO 2c: Detectar fila de encabezado → colMap { col: x } ────────────────
 function detectarEncabezado(filas) {
   for (let i = 0; i < filas.length; i++) {
     const fila   = filas[i];
@@ -149,151 +194,231 @@ function detectarEncabezado(filas) {
     for (const item of fila.items) {
       const norm = normText(item.text);
       for (const [col, aliases] of Object.entries(COL_ALIASES)) {
-        if (colMap[col] !== undefined) continue;          // ya encontrada
-        if (aliases.some(a => norm === a || norm.startsWith(a))) {
+        if (colMap[col] !== undefined) continue;
+        if (aliases.some(a => norm === a || norm.startsWith(a + ' ') || norm === a.replace(/ /g, ''))) {
           colMap[col] = item.x;
         }
       }
     }
 
-    // Mínimo requerido: fecha + cargos + abonos
-    if (colMap.fecha !== undefined && colMap.cargos !== undefined && colMap.abonos !== undefined) {
+    // Mínimo requerido: cargos + abonos (sin fecha también puede funcionar)
+    if (colMap.cargos !== undefined && colMap.abonos !== undefined) {
+      console.log(`[PDF] Encabezado detectado en fila ${i}:`, JSON.stringify(colMap));
       return { headerIdx: i, headerPage: fila.page, colMap };
     }
   }
   return null;
 }
 
-// ─── FASE 4: Asignar items de una fila a su columna más cercana ───────────────
-// Cada item va al colMap cuya x está más próxima. Devuelve { col: texto_celda }.
-function asignarColumnas(fila, colMap) {
-  const cols   = Object.entries(colMap);  // [[col, x], ...]
-  const celdas = {};
+// ─── PASO 2d: Crear zonas de columna ─────────────────────────────────────────
+// Devuelve { col: { xMin, xMax } } — las zonas son EXCLUSIVAS y no se superponen.
+//
+// Con VLines: cada col queda en el intervalo [vline_i, vline_i+1) que contiene su x.
+// Sin VLines: midpoints entre los x del encabezado ordenados por x.
+function crearZonas(colMap, fronteras) {
+  const zonas = {};
+  const colsOrdenadas = Object.entries(colMap).sort((a, b) => a[1] - b[1]);
 
-  for (const item of fila.items) {
-    let nearestCol = null;
-    let minDist    = Infinity;
-    for (const [col, x] of cols) {
-      const dist = Math.abs(item.x - x);
-      if (dist < minDist) { minDist = dist; nearestCol = col; }
+  if (fronteras.length >= 2) {
+    // ── Modo VLines: fronteras exactas ────────────────────────────────────────
+    for (const [col, cx] of Object.entries(colMap)) {
+      // Encontrar el intervalo [fronteras[i], fronteras[i+1]) que contiene cx
+      let xMin = -Infinity;
+      let xMax = Infinity;
+
+      if (cx < fronteras[0]) {
+        xMax = fronteras[0];
+      } else if (cx >= fronteras[fronteras.length - 1]) {
+        xMin = fronteras[fronteras.length - 1];
+      } else {
+        for (let i = 0; i < fronteras.length - 1; i++) {
+          if (cx >= fronteras[i] && cx < fronteras[i + 1]) {
+            xMin = fronteras[i];
+            xMax = fronteras[i + 1];
+            break;
+          }
+        }
+      }
+      zonas[col] = { xMin, xMax };
     }
-    if (nearestCol) {
-      celdas[nearestCol] = ((celdas[nearestCol] || '') + ' ' + item.text).trim();
+    console.log('[PDF] Zonas por VLines:', JSON.stringify(
+      Object.fromEntries(Object.entries(zonas).map(([c, z]) => [c, `[${z.xMin.toFixed(1)}, ${z.xMax.toFixed(1)})`]))
+    ));
+  } else {
+    // ── Fallback: midpoints entre columnas ordenadas ───────────────────────────
+    for (let i = 0; i < colsOrdenadas.length; i++) {
+      const [col, cx] = colsOrdenadas[i];
+      const xMin = i === 0
+        ? -Infinity
+        : (colsOrdenadas[i - 1][1] + cx) / 2;
+      const xMax = i === colsOrdenadas.length - 1
+        ? Infinity
+        : (cx + colsOrdenadas[i + 1][1]) / 2;
+      zonas[col] = { xMin, xMax };
     }
+    console.log('[PDF] Zonas por midpoints (sin VLines):', JSON.stringify(
+      Object.fromEntries(Object.entries(zonas).map(([c, z]) => [c, `[${z.xMin.toFixed(1)}, ${z.xMax.toFixed(1)})`]))
+    ));
   }
 
+  return zonas;
+}
+
+// ─── PASO 3: Asignar items de una fila a su zona de columna ──────────────────
+// Regla inviolable: la POSICIÓN determina el tipo, no la IA.
+function asignarPorZona(fila, zonas) {
+  const celdas = {};
+  for (const item of fila.items) {
+    let asignado = false;
+    for (const [col, { xMin, xMax }] of Object.entries(zonas)) {
+      if (item.x >= xMin && item.x < xMax) {
+        celdas[col] = ((celdas[col] || '') + ' ' + item.text).trim();
+        asignado = true;
+        break;
+      }
+    }
+    // Si no cae en ninguna zona conocida, ignorar (es texto fuera de la tabla)
+  }
   return celdas;
 }
 
-// ─── FASE 5: Parsear transacciones ───────────────────────────────────────────
+// ─── Pipeline principal ───────────────────────────────────────────────────────
 async function parsearPDF(buffer) {
-  // Fase 1
-  const items = await extraerItems(buffer);
+  // Paso 1: Extracción pura
+  const pdfData = await extraerDatosCrudos(buffer);
 
-  // ── DEBUG TEMPORAL ─────────────────────────────────────────────────────────
-  console.log('\n[PDF DEBUG] Total items extraídos por pdfreader:', items.length);
-  console.log('[PDF DEBUG] Primeros 40 items {page, x, y, text}:');
-  items.slice(0, 40).forEach((it, i) =>
-    console.log(`  [${String(i).padStart(2,'0')}] p${it.page} x=${String(it.x).padStart(5)} y=${String(it.y).padStart(5)}  ${JSON.stringify(it.text)}`)
-  );
-  // ── FIN DEBUG ──────────────────────────────────────────────────────────────
+  // Paso 2a: Líneas verticales
+  const fronteras = detectarVLines(pdfData);
 
-  // Fase 2
-  const filas = agruparEnFilas(items);
+  // Extraer texto
+  const items = extraerItems(pdfData);
+  console.log(`[PDF] Items de texto extraídos: ${items.length}`);
 
-  // ── DEBUG TEMPORAL ─────────────────────────────────────────────────────────
-  console.log(`\n[PDF DEBUG] Filas agrupadas: ${filas.length}`);
-  console.log('[PDF DEBUG] Primeras 20 filas:');
-  filas.slice(0, 20).forEach((f, i) => {
-    const texto = f.items.map(it => `[x${it.x}] ${it.text}`).join('  ');
-    console.log(`  [${String(i).padStart(2,'0')}] p${f.page} y=${f.y}  →  ${texto}`);
-  });
-  // ── FIN DEBUG ──────────────────────────────────────────────────────────────
-
-  // Fase 3
-  const header = detectarEncabezado(filas);
-
-  // ── DEBUG TEMPORAL ─────────────────────────────────────────────────────────
-  if (!header) {
-    console.log('\n[PDF DEBUG] ✗ No se detectó encabezado.');
-    console.log('[PDF DEBUG] Aliases buscados — fecha:', COL_ALIASES.fecha, '| cargos:', COL_ALIASES.cargos, '| abonos:', COL_ALIASES.abonos);
-  } else {
-    console.log(`\n[PDF DEBUG] ✓ Encabezado en fila ${header.headerIdx} (página ${header.headerPage}):`);
-    console.log('  items:', filas[header.headerIdx].items.map(it => `[x${it.x}] "${it.text}"`).join('  '));
-    console.log('  colMap:', header.colMap);
+  if (items.length === 0) {
+    throw new Error('El PDF no contiene texto seleccionable. Use un PDF generado digitalmente, no escaneado.');
   }
-  // ── FIN DEBUG ──────────────────────────────────────────────────────────────
 
-  if (!header) return [];
+  // Paso 2b: Agrupar en filas
+  const filas = agruparEnFilas(items);
+  console.log(`[PDF] Filas agrupadas: ${filas.length}`);
+
+  // Paso 2c: Detectar encabezado
+  const header = detectarEncabezado(filas);
+  if (!header) {
+    // Log filas para diagnóstico
+    console.log('[PDF] No se detectó encabezado. Primeras 15 filas:');
+    filas.slice(0, 15).forEach((f, i) => {
+      const texto = f.items.map(it => `[x${it.x.toFixed(1)}]"${it.text}"`).join(' ');
+      console.log(`  [${i}] p${f.page} y=${f.y.toFixed(2)} → ${texto}`);
+    });
+    return [];
+  }
+
+  // Paso 2d: Crear zonas de columna con VLines o fallback
+  const zonas = crearZonas(header.colMap, fronteras);
+
+  // Verificar que tenemos zonas para cargos y abonos
+  if (!zonas.cargos || !zonas.abonos) {
+    throw new Error('No se pudieron determinar las zonas de Cargos y Abonos en la tabla.');
+  }
 
   const transacciones = [];
+  let filaAnterior = null;  // para concatenar descripción multi-línea
 
-  // Fase 4 + 5: iterar filas de datos (tras el encabezado)
   for (let i = header.headerIdx + 1; i < filas.length; i++) {
     const fila = filas[i];
-
-    // Ignorar filas de páginas anteriores a la del encabezado (no debería pasar)
     if (fila.page < header.headerPage) continue;
 
-    const celdas = asignarColumnas(fila, header.colMap);
+    // Paso 3: Asignar por zona (no por distancia)
+    const celdas = asignarPorZona(fila, zonas);
 
-    // Fecha (Regla 7)
-    const fecha = extraerFecha(celdas.fecha || '');
-    if (!fecha) continue;
+    // ── Fecha (Regla 7) ──────────────────────────────────────────────────────
+    const fechaTexto = (celdas.fecha || Object.values(celdas)[0] || '');
+    const fecha = extraerFecha(fechaTexto);
 
-    // Descripción (Regla 9: la celda ya viene limpia, sin montos)
+    // Si no tiene fecha, puede ser continuación de descripción multi-línea
+    if (!fecha) {
+      if (filaAnterior && celdas.descripcion) {
+        filaAnterior.descripcion_original += ' ' + celdas.descripcion.trim();
+        filaAnterior.descripcion_normalizada = filaAnterior.descripcion_original
+          .toLowerCase().replace(/\s+/g, ' ').trim();
+      }
+      continue;
+    }
+
+    // ── Descripción (Regla 9) ────────────────────────────────────────────────
     let descripcion = (celdas.descripcion || '').trim();
     if (descripcion.length < 3) continue;
     if (SKIP_DESC_RE.test(normText(descripcion))) continue;
 
-    // Número de documento (Regla 1: texto, nunca monto)
-    const textoDocto = (celdas.docto || '').trim();
-    const mDocto     = textoDocto.match(/\w[\w\-]*/);
-    const numeroDocumento = mDocto ? mDocto[0] : null;
+    // ── Número de documento (Regla 1: NUNCA es monto) ───────────────────────
+    const textoDocto      = (celdas.docto || '').trim();
+    const mDocto          = textoDocto.match(/[\w][\w\-]*/);
+    const numero_documento = mDocto ? mDocto[0] : null;
 
-    // Cargo → egreso (Regla 2)
+    // ── PASO 3 — Regla inviolable: zona → tipo ───────────────────────────────
+    // La IA NUNCA decide esto. Solo la posición de la columna.
+    const vCargo = parseMonto(celdas.cargos || '');
+    const vAbono = parseMonto(celdas.abonos || '');
+
+    let cargo = 0;
+    let abono = 0;
     let monto = null;
     let tipo  = null;
-    const vCargo = parseMonto(celdas.cargos || '');
-    if (vCargo && vCargo > 0) { monto = vCargo; tipo = 'egreso'; }
 
-    // Abono → ingreso (Regla 3)
-    if (!monto) {
-      const vAbono = parseMonto(celdas.abonos || '');
-      if (vAbono && vAbono > 0) { monto = vAbono; tipo = 'ingreso'; }
-    }
-
-    // Fallback: algún número en la fila + tipo por descripción
-    if (!monto) {
+    if (vCargo && vCargo > 0) {
+      cargo = vCargo;
+      monto = vCargo;
+      tipo  = 'egreso';   // zona Cargos → egreso (siempre)
+    } else if (vAbono && vAbono > 0) {
+      abono = vAbono;
+      monto = vAbono;
+      tipo  = 'ingreso';  // zona Abonos → ingreso (siempre)
+    } else {
+      // Fallback: ningún monto en columnas específicas — buscar cualquier número
+      // y usar heurística de palabras clave (último recurso)
       for (const col of ['cargos', 'abonos', 'saldo']) {
         const v = parseMonto(celdas[col] || '');
-        if (v && v > 0) { monto = v; tipo = inferirTipo(descripcion); break; }
+        if (v && v > 0) {
+          monto = v;
+          tipo  = inferirTipo(descripcion);
+          if (tipo === 'egreso') cargo = v; else abono = v;
+          break;
+        }
       }
     }
 
-    // Saldo posterior (Regla 4)
-    const saldoPosterior = parseMonto(celdas.saldo || '');
+    // ── Saldo posterior (Regla 4: el más a la derecha) ───────────────────────
+    const saldo = parseMonto(celdas.saldo || '') || null;
 
-    // Validación (Fase 4)
+    // ── Validación ────────────────────────────────────────────────────────────
     if (!monto || !tipo) continue;
 
-    transacciones.push({
+    const tx = {
+      // Campos que espera el downstream (documents.js / webhooks.js)
       fecha_transaccion:       fecha,
       descripcion_original:    descripcion,
       descripcion_normalizada: descripcion.toLowerCase().replace(/\s+/g, ' ').trim(),
-      numero_documento:        numeroDocumento,
+      numero_documento,
       tipo,
       monto_original:          monto,
-      saldo_posterior:         saldoPosterior,
+      saldo_posterior:         saldo,
       moneda_original:         'CLP',
       fuente:                  'cartola_banco',
-    });
+      // Campos explícitos para auditoría (el usuario puede ver de dónde vino el monto)
+      cargo,
+      abono,
+      saldo,
+    };
+
+    transacciones.push(tx);
+    filaAnterior = tx;
   }
 
   return transacciones;
 }
 
-// ─── Exportación principal ───────────────────────────────────────────────────
+// ─── Exportación principal ────────────────────────────────────────────────────
 async function procesarPDF(buffer) {
   if (!Buffer.isBuffer(buffer)) {
     throw new Error('procesarPDF requiere un Buffer.');
@@ -305,7 +430,7 @@ async function procesarPDF(buffer) {
     throw new Error(
       'No se encontraron transacciones en el PDF. ' +
       'Verifique que sea una cartola bancaria chilena con texto seleccionable ' +
-      'y que contenga columnas Fecha, Cargos y Abonos.'
+      'y que contenga columnas Cargos/Débitos y Abonos/Créditos.'
     );
   }
 
