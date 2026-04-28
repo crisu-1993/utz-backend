@@ -208,12 +208,12 @@ router.post('/storage', async (req, res) => {
     });
   }
 
-  // ── Buscar empresa_id en la tabla empresas usando user_id ──────────────────
+  // ── Buscar empresa_id en la tabla empresas usando owner_id ─────────────────
   // El storage path usa auth.uid() como primer segmento, no el empresa_id.
   const { data: empresa, error: empresaErr } = await supabase
     .from('empresas')
     .select('id')
-    .eq('user_id', userId)
+    .eq('owner_id', userId)
     .maybeSingle();
 
   if (empresaErr) {
