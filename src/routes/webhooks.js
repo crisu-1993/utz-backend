@@ -21,10 +21,10 @@ function detectarTipo(nombreArchivo) {
   return null;
 }
 
-// ─── Resolver empresa_id desde el path del archivo ───────────────────────────
-// El bucket 'documentos' usa el patrón: {empresa_id}/{fecha}/{nombre_archivo}
-// El primer segmento del path es directamente el empresa_id — no hay lookup.
-function resolverEmpresaId(filePath) {
+// ─── Resolver user_id desde el path del archivo ──────────────────────────────
+// El bucket 'documentos' usa el patrón: {user_id}/{timestamp}/{nombre_archivo}
+// El primer segmento del path es el auth.uid() del usuario — no el empresa_id.
+function resolverUserId(filePath) {
   return (filePath || '').split('/')[0] || null;
 }
 
@@ -176,9 +176,9 @@ router.post('/storage', async (req, res) => {
   }
 
   const record = payload.record || {};
-  const bucketName = record.bucket_id;
-  const filePath   = record.name;       // e.g. "empresa-123/cartola_abril.xlsx"
-  const ownerUserId = record.owner;
+  const bucketName  = record.bucket_id;
+  const filePath    = record.name;    // e.g. "{user_id}/{timestamp}/cartola_abril.xlsx"
+  const ownerUserId = record.owner;   // auth.uid() del usuario que subió el archivo
 
   // Ignorar buckets que no sean de documentos
   const BUCKETS_ACEPTADOS = (process.env.STORAGE_BUCKETS || 'documentos').split(',');
@@ -194,39 +194,40 @@ router.post('/storage', async (req, res) => {
 
   const supabase = getSupabase();
 
-  // ── Resolver empresa_id ─────────────────────────────────────────────────────
-  const empresaId = resolverEmpresaId(filePath);
-  console.log(`[webhook] empresa_id extraído del path: '${empresaId}' (path completo: '${filePath}')`);
+  // ── Resolver user_id (primer segmento del path o record.owner) ─────────────
+  // Preferimos record.owner (garantizado por Supabase Storage) y usamos el
+  // primer segmento del path como fallback.
+  const userId = ownerUserId || resolverUserId(filePath);
+  console.log(`[WEBHOOK] user_id extraído: '${userId}' (owner='${ownerUserId}', path='${filePath}')`);
 
-  if (!empresaId) {
-    console.error(`[webhook] No se pudo extraer empresa_id del path: ${filePath}`);
+  if (!userId) {
+    console.error(`[WEBHOOK] No se pudo determinar el user_id — path: '${filePath}'`);
     return res.status(422).json({
       ok: false,
-      error: 'No se pudo determinar la empresa. El archivo debe estar en una carpeta con el empresa_id.',
+      error: 'No se pudo determinar el usuario. El archivo debe estar en una carpeta con el user_id.',
     });
   }
 
-  // ── Verificar que el empresa_id existe en la tabla empresas ────────────────
-  // El primer segmento del path es directamente el id de la empresa.
-  console.log('[webhook] empresaId raw:', JSON.stringify(empresaId), 'length:', empresaId.length);
+  // ── Buscar empresa_id en la tabla empresas usando user_id ──────────────────
+  // El storage path usa auth.uid() como primer segmento, no el empresa_id.
   const { data: empresa, error: empresaErr } = await supabase
     .from('empresas')
     .select('id')
-    .eq('id', empresaId)
+    .eq('user_id', userId)
     .maybeSingle();
 
   if (empresaErr) {
-    console.error(`[webhook] Error consultando empresa '${empresaId}':`, empresaErr.message);
+    console.error(`[WEBHOOK] Error consultando empresa para user_id '${userId}':`, empresaErr.message);
     return res.status(500).json({ ok: false, error: empresaErr.message });
   }
 
   if (!empresa) {
-    console.log(`[webhook] empresa_id '${empresaId}' no existe en tabla empresas — path: '${filePath}' — ignorando evento`);
-    return res.json({ ok: true, ignorado: true, razon: `empresa_id '${empresaId}' no existe en empresas` });
+    console.log(`[WEBHOOK] empresa NO encontrada para user_id '${userId}' — path: '${filePath}' — ignorando evento`);
+    return res.json({ ok: true, ignorado: true, razon: `No existe empresa para user_id '${userId}'` });
   }
 
   const empresaRealId = empresa.id;
-  console.log(`[webhook] Empresa encontrada: id='${empresaRealId}'`);
+  console.log(`[WEBHOOK] empresa encontrada para user_id '${userId}': empresa_id='${empresaRealId}'`);
 
   const nombreArchivo = filePath.split('/').pop();
 

@@ -355,6 +355,24 @@ router.get('/status/:empresa_id', async (req, res) => {
   }
 });
 
+// ─── GET /api/documents/upload-path ──────────────────────────────────────────
+// Retorna la ruta base que el frontend debe usar al subir un archivo a Storage.
+// Patrón: {user_id}/{timestamp}
+// Requiere Authorization: Bearer <token de Supabase>
+router.get('/upload-path', authMiddleware, (req, res) => {
+  const { user_id } = req.auth;
+  const timestamp   = Date.now();
+  const path        = `${user_id}/${timestamp}`;
+
+  console.log(`[WEBHOOK] upload-path generado para user_id='${user_id}': '${path}'`);
+
+  return res.json({
+    ok:   true,
+    path,
+    user_id,
+  });
+});
+
 // ─── GET /api/documents/test ──────────────────────────────────────────────────
 router.get('/test', (_req, res) => {
   res.json({
@@ -362,10 +380,11 @@ router.get('/test', (_req, res) => {
     message: 'Motor de procesamiento de documentos listo',
     tipos_soportados: ['excel', 'csv', 'pdf'],
     endpoints: {
-      procesar:    'POST /api/documents/process',
-      resultados:  'GET  /api/documents/results/:empresa_id',
-      estado:      'GET  /api/documents/status/:empresa_id',
-      webhook:     'POST /api/webhooks/storage',
+      procesar:      'POST /api/documents/process',
+      resultados:    'GET  /api/documents/results/:empresa_id',
+      estado:        'GET  /api/documents/status/:empresa_id',
+      upload_path:   'GET  /api/documents/upload-path',
+      webhook:       'POST /api/webhooks/storage',
     },
   });
 });
