@@ -62,7 +62,7 @@ const SKIP_DESC_RE =
 // FIX-1: columna fecha solo acepta token con formato de fecha exacto
 const FECHA_TOKEN_RE = /^\d{2}[\/\-\.]\d{2}[\/\-\.](\d{4}|\d{2})$/;
 
-// FIX-2: columnas de monto no aceptan tokens de < 3 chars (artefactos del PDF)
+// FIX-2: columnas de monto solo aceptan tokens que sean números válidos
 const MONTO_COLS = new Set(['cargos', 'abonos', 'saldo']);
 
 // Palabras clave para inferir tipo (último fallback — rara vez se usa)
@@ -152,9 +152,22 @@ function esEncabezadoRepetido(fila) {
 // FIXES DE ASIGNACIÓN (FIX-1 y FIX-2)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// FIX-2: verifica que un string represente un número válido.
+// Acepta "1", "50", "1.490", "1.490,50" — rechaza "a", "b", fragmentos PDF.
+function esNumeroValido(str) {
+  const limpio = String(str)
+    .replace(/[$\s]/g, '')   // quitar $ y espacios
+    .replace(/\./g, '')      // quitar puntos de miles
+    .replace(',', '.')       // coma decimal → punto
+    .trim();
+  const numero = parseFloat(limpio);
+  return !isNaN(numero) && isFinite(numero);
+}
+
 // Decide la columna final para un elemento. Aplica:
 //   FIX-1: si va a "fecha" pero no es formato de fecha → redirigir a "descripcion"
-//   FIX-2: si va a columna de monto y tiene < 3 chars → descartar (artefacto PDF)
+//   FIX-2: si va a columna de monto y no es número válido → descartar (artefacto PDF)
+//   docto: siempre se guarda como string — nunca se filtra con esNumeroValido()
 // Devuelve el nombre de columna definitivo, o null si hay que descartar.
 function resolverColumna(col, texto, filaNum) {
   const txt = texto.trim();
@@ -164,8 +177,8 @@ function resolverColumna(col, texto, filaNum) {
     return 'descripcion';
   }
 
-  if (MONTO_COLS.has(col) && txt.length < 3) {
-    console.log(`[PDF-FIX2] fragmento descartado: "${txt}" en columna ${col} fila ${filaNum}`);
+  if (MONTO_COLS.has(col) && !esNumeroValido(txt)) {
+    console.log(`[PDF-FIX2] descartado no-numero: "${txt}" en columna ${col} fila ${filaNum}`);
     return null;
   }
 
