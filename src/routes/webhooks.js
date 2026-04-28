@@ -101,9 +101,16 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
       }];
     });
 
-    // 6. Insertar uno a uno para identificar el registro que falla
+    // 6. Insertar uno a uno verificando duplicados
     let insertados = 0;
+    let duplicados = 0;
     for (const registro of registros) {
+      const duplicado = await esTransaccionDuplicada(supabase, empresaId, registro);
+      if (duplicado) {
+        console.log(`[WEBHOOK] transacción duplicada omitida: ${registro.fecha_transaccion} ${registro.tipo} ${registro.monto_original} docto:${registro.numero_documento}`);
+        duplicados++;
+        continue;
+      }
       const { error } = await supabase.from('transacciones_historicas').insert([registro]);
       if (error) {
         console.log('[webhook] falla registro:', JSON.stringify({ monto: registro.monto_original, confianza: registro.confianza_deteccion, desc: registro.descripcion_original }));
@@ -112,6 +119,7 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
         insertados++;
       }
     }
+    if (duplicados > 0) console.log(`[WEBHOOK] ${duplicados} transacciones duplicadas omitidas`);
 
     // 7. Calcular totales
     const totalIngresos = registros
@@ -152,6 +160,20 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
       // best-effort — no interrumpir si este update también falla
     }
   }
+}
+
+// ─── Validación anti-duplicados a nivel de transacción ───────────────────────
+async function esTransaccionDuplicada(supabase, empresaId, tx) {
+  const { data } = await supabase
+    .from('transacciones_historicas')
+    .select('id')
+    .eq('empresa_id', empresaId)
+    .eq('fecha_transaccion', tx.fecha_transaccion)
+    .eq('monto_original', tx.monto_original)
+    .eq('tipo', tx.tipo)
+    .eq('numero_documento', tx.numero_documento || '000000000')
+    .limit(1);
+  return data && data.length > 0;
 }
 
 // ─── POST /api/webhooks/storage ───────────────────────────────────────────────
