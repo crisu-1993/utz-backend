@@ -37,7 +37,7 @@ const COL_ALIASES = {
                 'movimiento', 'narracion', 'texto'],
   docto:       ['docto', 'docto.', 'documento', 'n°doc', 'n° doc', 'n doc',
                 'ndoc', 'referencia', 'nro', 'nro.', 'nro doc', 'nrodoc',
-                'folio', 'n°', 'n ref', 'ref', 'num'],
+                'folio', 'n°', 'n ref', 'ref', 'num', 'comprobante'],
   cargos:      ['cargo', 'cargos', 'debito', 'debitos', 'monto debito',
                 'retiro', 'egreso', 'db', 'debit', 'debits'],
   abonos:      ['abono', 'abonos', 'credito', 'creditos', 'monto credito',
