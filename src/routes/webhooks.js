@@ -231,6 +231,20 @@ router.post('/storage', async (req, res) => {
 
   const nombreArchivo = filePath.split('/').pop();
 
+  // ── Validación anti-duplicados ─────────────────────────────────────────────
+  const { data: existente } = await supabase
+    .from('importaciones_historicas')
+    .select('id')
+    .eq('empresa_id', empresaRealId)
+    .eq('nombre_archivo', nombreArchivo)
+    .limit(1)
+    .maybeSingle();
+
+  if (existente) {
+    console.log('[WEBHOOK] archivo ya procesado, ignorando:', nombreArchivo);
+    return res.json({ ok: true, ignorado: true, razon: 'Archivo ya procesado anteriormente' });
+  }
+
   // ── Crear registro en importaciones_historicas ──────────────────────────────
   const { data: importacion, error: importErr } = await supabase
     .from('importaciones_historicas')
