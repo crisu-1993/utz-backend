@@ -130,12 +130,13 @@ router.get('/:empresa_id', async (req, res) => {
 
   let rango, rangoAnt, periodo;
 
-  if (req.query.inicio) {
-    // Formato 2: ?inicio=2026-03-01&fin=2026-03-31
-    const fecha = new Date(req.query.inicio);
+  if (req.query.inicio || req.query.fecha_inicio) {
+    // Formato 2: ?inicio=2026-03-01&fin=2026-03-31 o ?fecha_inicio=...&fecha_fin=...
+    const raw   = req.query.inicio || req.query.fecha_inicio;
+    const fecha = new Date(raw);
     const mes   = fecha.getMonth() + 1;
     const anio  = fecha.getFullYear();
-    console.log('[RESUMEN] params recibidos:', req.query.mes, req.query.anio, req.query.inicio);
+    console.log('[RESUMEN] params recibidos:', req.query.mes, req.query.anio, raw);
     rango    = calcularRangoMes(anio, mes);
     rangoAnt = calcularRangoMes(mes === 1 ? anio - 1 : anio, mes === 1 ? 12 : mes - 1);
     periodo  = 'mes';
