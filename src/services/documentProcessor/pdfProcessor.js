@@ -317,6 +317,9 @@ function asignarPorZona(fila, zonas, filaNum = 0) {
       if (item.x >= xMin && item.x < xMax) {
         const colFinal = resolverColumna(col, item.text, filaNum);
         if (colFinal !== null) {
+          if (['cargos', 'abonos'].includes(col) && esNumeroValido(item.text)) {
+            console.log(`[PDF-ABONO] fila ${filaNum}: valor=${item.text} x=${item.x.toFixed(3)} asignado_a=${col} tipo=${col === 'abonos' ? 'ingreso' : 'egreso'}`);
+          }
           celdas[colFinal] = ((celdas[colFinal] || '') + ' ' + item.text).trim();
         }
         break;
@@ -347,6 +350,9 @@ function asignarPorDistancia(fila, colMap, filaNum = 0) {
     if (nearestCol) {
       const colFinal = resolverColumna(nearestCol, item.text, filaNum);
       if (colFinal !== null) {
+        if (['cargos', 'abonos'].includes(nearestCol) && esNumeroValido(item.text)) {
+          console.log(`[PDF-ABONO] fila ${filaNum}: valor=${item.text} x=${item.x.toFixed(3)} asignado_a=${nearestCol} tipo=${nearestCol === 'abonos' ? 'ingreso' : 'egreso'}`);
+        }
         celdas[colFinal] = ((celdas[colFinal] || '') + ' ' + item.text).trim();
       }
     }
