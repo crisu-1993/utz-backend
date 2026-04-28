@@ -96,6 +96,15 @@ function calcularRangoAnterior(periodo) {
   };
 }
 
+// ─── Calcular rango exacto de un mes específico ───────────────────────────────
+function calcularRangoMes(anio, mes) {
+  const ultimoDia = new Date(anio, mes, 0).getDate();
+  return {
+    fecha_inicio: `${anio}-${String(mes).padStart(2, '0')}-01`,
+    fecha_fin:    `${anio}-${String(mes).padStart(2, '0')}-${ultimoDia}`,
+  };
+}
+
 // ─── Calcular variación % entre dos valores ───────────────────────────────────
 function variacionPct(actual, anterior) {
   if (anterior === 0) return actual > 0 ? 100 : 0;
@@ -118,21 +127,41 @@ async function consultarPeriodo(supabase, empresa_id, fecha_inicio, fecha_fin) {
 // ─── GET /api/resumen/:empresa_id ─────────────────────────────────────────────
 router.get('/:empresa_id', async (req, res) => {
   const { empresa_id } = req.params;
-  const periodo = (req.query.periodo || 'mes').toLowerCase();
 
-  const periodosValidos = ['hoy', 'semana', 'mes', 'año'];
-  if (!periodosValidos.includes(periodo)) {
-    return res.status(400).json({
-      ok: false,
-      error: `Período inválido. Use: ${periodosValidos.join(', ')}`,
-    });
+  let rango, rangoAnt, periodo;
+
+  if (req.query.inicio) {
+    // Formato 2: ?inicio=2026-03-01&fin=2026-03-31
+    const fecha = new Date(req.query.inicio);
+    const mes   = fecha.getMonth() + 1;
+    const anio  = fecha.getFullYear();
+    rango    = calcularRangoMes(anio, mes);
+    rangoAnt = calcularRangoMes(mes === 1 ? anio - 1 : anio, mes === 1 ? 12 : mes - 1);
+    periodo  = 'mes';
+  } else if (req.query.mes && (req.query.anio || req.query.año)) {
+    // Formato 1: ?mes=3&anio=2026 o ?mes=3&año=2026
+    const mes  = parseInt(req.query.mes, 10);
+    const anio = parseInt(req.query.anio || req.query.año, 10);
+    rango    = calcularRangoMes(anio, mes);
+    rangoAnt = calcularRangoMes(mes === 1 ? anio - 1 : anio, mes === 1 ? 12 : mes - 1);
+    periodo  = 'mes';
+  } else {
+    // Formato original: ?periodo=mes|semana|hoy|año (default: mes actual)
+    periodo = (req.query.periodo || 'mes').toLowerCase();
+    const periodosValidos = ['hoy', 'semana', 'mes', 'año'];
+    if (!periodosValidos.includes(periodo)) {
+      return res.status(400).json({
+        ok: false,
+        error: `Período inválido. Use: ${periodosValidos.join(', ')}`,
+      });
+    }
+    rango    = calcularRango(periodo);
+    rangoAnt = calcularRangoAnterior(periodo);
   }
 
   const supabase = getSupabase();
 
   try {
-    const rango      = calcularRango(periodo);
-    const rangoAnt   = calcularRangoAnterior(periodo);
 
     // Consultar período actual y anterior en paralelo
     const [txActual, txAnterior] = await Promise.all([

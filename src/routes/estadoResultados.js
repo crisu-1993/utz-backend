@@ -99,21 +99,30 @@ function agruparPorCategoria(transacciones, categoriasFijas) {
 // ─── GET /api/estado-resultados/:empresa_id ───────────────────────────────────
 router.get('/:empresa_id', async (req, res) => {
   const { empresa_id } = req.params;
-  const { mes, año: anio } = req.query;
 
   if (!empresa_id) {
     return res.status(400).json({ ok: false, error: 'empresa_id es requerido.' });
   }
 
-  const { desde, hasta } = buildDateRange(mes, anio);
+  let mes, anio;
 
-  // Validar que si se pasa mes se pase también año
-  if (mes && !anio) {
-    return res.status(400).json({
-      ok: false,
-      error: 'Si se filtra por mes también debe enviarse el parámetro año.',
-    });
+  if (req.query.inicio) {
+    // Formato 2: ?inicio=2026-03-01&fin=2026-03-31
+    const fecha = new Date(req.query.inicio);
+    mes  = fecha.getMonth() + 1;
+    anio = fecha.getFullYear();
+  } else if (req.query.mes && (req.query.anio || req.query.año)) {
+    // Formato 1: ?mes=3&anio=2026 o ?mes=3&año=2026
+    mes  = req.query.mes;
+    anio = req.query.anio || req.query.año;
+  } else {
+    // Default: mes actual
+    const hoy = new Date();
+    mes  = hoy.getMonth() + 1;
+    anio = hoy.getFullYear();
   }
+
+  const { desde, hasta } = buildDateRange(mes, anio);
 
   const supabase = getSupabase();
 

@@ -155,8 +155,18 @@ router.get('/:empresa_id', async (req, res) => {
   const { empresa_id } = req.params;
 
   const hoy  = new Date();
-  const mes  = parseInt(req.query.mes  || hoy.getMonth() + 1, 10);
-  const año  = parseInt(req.query.año  || hoy.getFullYear(),  10);
+  let mes, año;
+
+  if (req.query.inicio) {
+    // Formato 2: ?inicio=2026-03-01&fin=2026-03-31
+    const fecha = new Date(req.query.inicio);
+    mes = fecha.getMonth() + 1;
+    año = fecha.getFullYear();
+  } else {
+    // Formato 1: ?mes=3&anio=2026 o ?mes=3&año=2026, o defaults
+    mes = parseInt(req.query.mes  || (hoy.getMonth() + 1), 10);
+    año = parseInt(req.query.año  || req.query.anio || hoy.getFullYear(), 10);
+  }
 
   if (isNaN(mes) || mes < 1 || mes > 12) {
     return res.status(400).json({ ok: false, error: 'Parámetro mes inválido (1–12)' });
