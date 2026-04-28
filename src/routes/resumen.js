@@ -135,13 +135,15 @@ router.get('/:empresa_id', async (req, res) => {
     const fecha = new Date(req.query.inicio);
     const mes   = fecha.getMonth() + 1;
     const anio  = fecha.getFullYear();
+    console.log('[RESUMEN] params recibidos:', req.query.mes, req.query.anio, req.query.inicio);
     rango    = calcularRangoMes(anio, mes);
     rangoAnt = calcularRangoMes(mes === 1 ? anio - 1 : anio, mes === 1 ? 12 : mes - 1);
     periodo  = 'mes';
-  } else if (req.query.mes && (req.query.anio || req.query.año)) {
-    // Formato 1: ?mes=3&anio=2026 o ?mes=3&año=2026
+  } else if (req.query.mes) {
+    // Formato 1: ?mes=3&anio=2026 o ?mes=3&año=2026 (anio opcional, default año actual)
     const mes  = parseInt(req.query.mes, 10);
-    const anio = parseInt(req.query.anio || req.query.año, 10);
+    const anio = parseInt(req.query.anio || req.query.año || new Date().getFullYear(), 10);
+    console.log('[RESUMEN] params recibidos:', req.query.mes, req.query.anio, req.query.inicio);
     rango    = calcularRangoMes(anio, mes);
     rangoAnt = calcularRangoMes(mes === 1 ? anio - 1 : anio, mes === 1 ? 12 : mes - 1);
     periodo  = 'mes';
@@ -155,9 +157,12 @@ router.get('/:empresa_id', async (req, res) => {
         error: `Período inválido. Use: ${periodosValidos.join(', ')}`,
       });
     }
+    console.log('[RESUMEN] params recibidos:', req.query.mes, req.query.anio, req.query.inicio);
     rango    = calcularRango(periodo);
     rangoAnt = calcularRangoAnterior(periodo);
   }
+
+  console.log('[RESUMEN] fechas calculadas:', rango.fecha_inicio, rango.fecha_fin);
 
   const supabase = getSupabase();
 
