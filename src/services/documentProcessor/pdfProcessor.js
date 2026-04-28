@@ -98,6 +98,32 @@ const COL_ALIASES = {
 // Filas a descartar aunque tengan fecha
 const SKIP_DESC_RE = /^(saldo anterior|saldo inicial|total |subtotal|totales|resumen)\b/;
 
+// FIX 1: columna fecha solo acepta exactamente una fecha (DD/MM/YYYY o DD/MM/YY o con guión)
+const FECHA_SIMPLE_RE = /^\d{2}[\/\-]\d{2}[\/\-](\d{4}|\d{2})$/;
+
+// FIX 2: columnas de monto no aceptan fragmentos de menos de 3 caracteres
+const MONTO_COLS = new Set(['cargos', 'abonos', 'saldo']);
+
+// Decide la columna final para un elemento, aplicando FIX 1 y FIX 2.
+// Devuelve el nombre de columna definitivo, o null si el elemento debe descartarse.
+function resolverColumna(col, texto, filaNum) {
+  const txt = texto.trim();
+
+  // FIX 1: si fue asignado a "fecha" pero no tiene formato de fecha → descripcion
+  if (col === 'fecha' && !FECHA_SIMPLE_RE.test(txt)) {
+    console.log(`[PDF-FIX1] fecha corregida: "${txt}" reasignado a descripcion (fila ${filaNum})`);
+    return 'descripcion';
+  }
+
+  // FIX 2: fragmento corto en columna de monto → descartar (artefacto del PDF)
+  if (MONTO_COLS.has(col) && txt.length < 3) {
+    console.log(`[PDF-FIX2] fragmento descartado: "${txt}" en columna ${col} fila ${filaNum}`);
+    return null;
+  }
+
+  return col;
+}
+
 // Heurística de tipo por palabras clave (último fallback — nunca es el camino principal)
 const KW_INGRESO = ['abono', 'deposito', 'transferencia recibida', 'credito', 'remuneracion', 'sueldo', 'devolucion'];
 const KW_EGRESO  = ['pago', 'cargo', 'debito', 'retiro', 'cuota', 'comision', 'impuesto', 'compra', 'giro'];
@@ -242,12 +268,15 @@ function crearZonasVLines(colMap, fronteras) {
 }
 
 // ─── Asignar items a columna por zona (modo VLines) ──────────────────────────
-function asignarPorZona(fila, zonas) {
+function asignarPorZona(fila, zonas, filaNum = 0) {
   const celdas = {};
   for (const item of fila.items) {
     for (const [col, { xMin, xMax }] of Object.entries(zonas)) {
       if (item.x >= xMin && item.x < xMax) {
-        celdas[col] = ((celdas[col] || '') + ' ' + item.text).trim();
+        const colFinal = resolverColumna(col, item.text, filaNum);
+        if (colFinal !== null) {
+          celdas[colFinal] = ((celdas[colFinal] || '') + ' ' + item.text).trim();
+        }
         break;
       }
     }
@@ -266,7 +295,7 @@ function asignarPorZona(fila, zonas) {
 //
 //   elemento x=23.002, cargos=22.169, abonos=25.756
 //   → dist a cargos=0.833, dist a abonos=2.754 → asignado a cargos ✓
-function asignarPorDistancia(fila, colMap) {
+function asignarPorDistancia(fila, colMap, filaNum = 0) {
   const cols = Object.entries(colMap);  // [[col, x_encabezado], ...]
   const celdas = {};
 
@@ -281,7 +310,10 @@ function asignarPorDistancia(fila, colMap) {
       }
     }
     if (nearestCol) {
-      celdas[nearestCol] = ((celdas[nearestCol] || '') + ' ' + item.text).trim();
+      const colFinal = resolverColumna(nearestCol, item.text, filaNum);
+      if (colFinal !== null) {
+        celdas[colFinal] = ((celdas[colFinal] || '') + ' ' + item.text).trim();
+      }
     }
   }
 
@@ -338,8 +370,8 @@ async function parsearPDF(buffer) {
     // Paso 3: Asignar columna por zona (VLines) o por distancia mínima (fallback)
     // Regla inviolable: la posición del elemento determina su tipo, nunca la IA.
     const celdas = usaVLines
-      ? asignarPorZona(fila, zonas)
-      : asignarPorDistancia(fila, header.colMap);
+      ? asignarPorZona(fila, zonas, i)
+      : asignarPorDistancia(fila, header.colMap, i);
 
     // ── Fecha (Regla 7) ──────────────────────────────────────────────────────
     const fechaTexto = (celdas.fecha || Object.values(celdas)[0] || '');
