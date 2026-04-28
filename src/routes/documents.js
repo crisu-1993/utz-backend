@@ -373,6 +373,66 @@ router.get('/upload-path', authMiddleware, (req, res) => {
   });
 });
 
+// ─── DELETE /api/documents/:empresa_id/importacion ───────────────────────────
+// Elimina una importación junto con todas sus transacciones asociadas.
+// Body: { archivo_nombre: string }
+// Requiere Authorization: Bearer <token de Supabase>
+router.delete('/:empresa_id/importacion', authMiddleware, async (req, res) => {
+  const { empresa_id } = req.params;
+  const { archivo_nombre } = req.body;
+
+  if (req.auth.empresa_id !== empresa_id) {
+    return res.status(403).json({ ok: false, error: 'Sin autorización para esta empresa' });
+  }
+
+  if (!archivo_nombre) {
+    return res.status(400).json({ ok: false, error: 'Falta campo requerido: archivo_nombre' });
+  }
+
+  const supabase = getSupabase();
+
+  try {
+    // 1. Buscar el registro de importación por nombre de archivo y empresa
+    const { data: importacion, error: findErr } = await supabase
+      .from('importaciones_historicas')
+      .select('id')
+      .eq('empresa_id', empresa_id)
+      .eq('nombre_archivo', archivo_nombre)
+      .maybeSingle();
+
+    if (findErr) throw new Error(findErr.message);
+
+    if (!importacion) {
+      // Idempotente: si ya no existe, OK
+      return res.json({ ok: true, mensaje: 'Importación no encontrada, nada que eliminar' });
+    }
+
+    // 2. Eliminar todas las transacciones asociadas a esta importación
+    const { error: txErr } = await supabase
+      .from('transacciones_historicas')
+      .delete()
+      .eq('importacion_id', importacion.id);
+
+    if (txErr) throw new Error(txErr.message);
+
+    // 3. Eliminar el registro de importación
+    const { error: impErr } = await supabase
+      .from('importaciones_historicas')
+      .delete()
+      .eq('id', importacion.id);
+
+    if (impErr) throw new Error(impErr.message);
+
+    console.log(`[delete-importacion] ✓ Eliminada importación ${importacion.id} (${archivo_nombre}) para empresa ${empresa_id}`);
+
+    return res.json({ ok: true, eliminado: { importacion_id: importacion.id, archivo_nombre } });
+
+  } catch (err) {
+    console.error('[delete-importacion] Error:', err.message);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── GET /api/documents/test ──────────────────────────────────────────────────
 router.get('/test', (_req, res) => {
   res.json({
@@ -380,11 +440,12 @@ router.get('/test', (_req, res) => {
     message: 'Motor de procesamiento de documentos listo',
     tipos_soportados: ['excel', 'csv', 'pdf'],
     endpoints: {
-      procesar:      'POST /api/documents/process',
-      resultados:    'GET  /api/documents/results/:empresa_id',
-      estado:        'GET  /api/documents/status/:empresa_id',
-      upload_path:   'GET  /api/documents/upload-path',
-      webhook:       'POST /api/webhooks/storage',
+      procesar:             'POST   /api/documents/process',
+      resultados:           'GET    /api/documents/results/:empresa_id',
+      estado:               'GET    /api/documents/status/:empresa_id',
+      upload_path:          'GET    /api/documents/upload-path',
+      delete_importacion:   'DELETE /api/documents/:empresa_id/importacion',
+      webhook:              'POST   /api/webhooks/storage',
     },
   });
 });
