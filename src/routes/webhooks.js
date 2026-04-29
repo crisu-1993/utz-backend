@@ -252,45 +252,59 @@ router.post('/storage', async (req, res) => {
   console.log(`[WEBHOOK] empresa encontrada para user_id '${userId}': empresa_id='${empresaRealId}'`);
 
   const nombreArchivo = filePath.split('/').pop();
+  // Nombre limpio: elimina prefijo de timestamp (ej: "1777458613943-Cartola Scotiabank.pdf" → "Cartola Scotiabank.pdf")
+  const nombreLimpio = nombreArchivo.replace(/^\d+-/, '');
 
-  // ── Validación anti-duplicados ─────────────────────────────────────────────
+  // ── Buscar registro existente creado por el frontend ───────────────────────
   const { data: existente } = await supabase
     .from('importaciones_historicas')
-    .select('id')
+    .select('id, estado')
     .eq('empresa_id', empresaRealId)
-    .eq('nombre_archivo', nombreArchivo)
+    .eq('nombre_archivo', nombreLimpio)
+    .in('estado', ['pendiente', 'subiendo'])
+    .order('fecha_subida', { ascending: false })
     .limit(1)
     .maybeSingle();
 
+  let importacionId;
+
   if (existente) {
-    console.log('[WEBHOOK] archivo ya procesado, ignorando:', nombreArchivo);
-    return res.json({ ok: true, ignorado: true, razon: 'Archivo ya procesado anteriormente' });
-  }
+    // Encontrado: actualizar storage_path y reusar el id del frontend
+    console.log(`[WEBHOOK] registro existente encontrado (id=${existente.id}), actualizando storage_path`);
+    await supabase
+      .from('importaciones_historicas')
+      .update({ archivo_path: filePath, storage_path: filePath })
+      .eq('id', existente.id);
+    importacionId = existente.id;
+  } else {
+    // Caso edge: frontend no creó registro, crear uno nuevo
+    console.log(`[WEBHOOK] sin registro previo para '${nombreLimpio}', creando nuevo`);
+    const { data: nuevo, error: importErr } = await supabase
+      .from('importaciones_historicas')
+      .insert({
+        empresa_id:      empresaRealId,
+        nombre_archivo:  nombreLimpio,
+        archivo_path:    filePath,
+        storage_path:    filePath,
+        bucket_name:     bucketName,
+        estado:          'pendiente',
+        fecha_subida:    new Date().toISOString(),
+      })
+      .select('id')
+      .single();
 
-  // ── Crear registro en importaciones_historicas ──────────────────────────────
-  const { data: importacion, error: importErr } = await supabase
-    .from('importaciones_historicas')
-    .insert({
-      empresa_id:      empresaRealId,
-      nombre_archivo:  nombreArchivo,
-      archivo_path:    filePath,
-      bucket_name:     bucketName,
-      estado:          'pendiente',
-      fecha_subida:    new Date().toISOString(),
-    })
-    .select('id')
-    .single();
-
-  if (importErr) {
-    console.error('[webhook] Error creando importacion:', importErr.message);
-    return res.status(500).json({ ok: false, error: importErr.message });
+    if (importErr) {
+      console.error('[webhook] Error creando importacion:', importErr.message);
+      return res.status(500).json({ ok: false, error: importErr.message });
+    }
+    importacionId = nuevo.id;
   }
 
   // ── Responder inmediatamente y procesar en background ──────────────────────
   res.json({
     ok: true,
     mensaje: 'Archivo recibido, procesando en background',
-    importacion_id: importacion.id,
+    importacion_id: importacionId,
     empresa_id:     empresaRealId,
     archivo:        nombreArchivo,
   });
@@ -302,7 +316,7 @@ router.post('/storage', async (req, res) => {
       empresaId:     empresaRealId,
       bucketName,
       filePath,
-      importacionId: importacion.id,
+      importacionId,
     });
   });
 });
