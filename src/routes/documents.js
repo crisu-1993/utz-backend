@@ -375,29 +375,29 @@ router.get('/upload-path', authMiddleware, (req, res) => {
 
 // ─── DELETE /api/documents/:empresa_id/importacion ───────────────────────────
 // Elimina una importación junto con todas sus transacciones asociadas.
-// Body: { archivo_nombre: string }
+// Body: { importacion_id: string }
 // Requiere Authorization: Bearer <token de Supabase>
 router.delete('/:empresa_id/importacion', authMiddleware, async (req, res) => {
   const { empresa_id } = req.params;
-  const { archivo_nombre } = req.body;
+  const { importacion_id } = req.body;
 
   if (req.auth.empresa_id !== empresa_id) {
     return res.status(403).json({ ok: false, error: 'Sin autorización para esta empresa' });
   }
 
-  if (!archivo_nombre) {
-    return res.status(400).json({ ok: false, error: 'Falta campo requerido: archivo_nombre' });
+  if (!importacion_id) {
+    return res.status(400).json({ ok: false, error: 'Falta campo requerido: importacion_id' });
   }
 
   const supabase = getSupabase();
 
   try {
-    // 1. Buscar el registro de importación por nombre de archivo y empresa
+    // 1. Verificar que la importación existe y pertenece a esta empresa
     const { data: importacion, error: findErr } = await supabase
       .from('importaciones_historicas')
-      .select('id')
+      .select('id, nombre_archivo')
+      .eq('id', importacion_id)
       .eq('empresa_id', empresa_id)
-      .eq('nombre_archivo', archivo_nombre)
       .maybeSingle();
 
     if (findErr) throw new Error(findErr.message);
@@ -411,7 +411,7 @@ router.delete('/:empresa_id/importacion', authMiddleware, async (req, res) => {
     const { error: txErr } = await supabase
       .from('transacciones_historicas')
       .delete()
-      .eq('importacion_id', importacion.id);
+      .eq('importacion_id', importacion_id);
 
     if (txErr) throw new Error(txErr.message);
 
@@ -419,13 +419,13 @@ router.delete('/:empresa_id/importacion', authMiddleware, async (req, res) => {
     const { error: impErr } = await supabase
       .from('importaciones_historicas')
       .delete()
-      .eq('id', importacion.id);
+      .eq('id', importacion_id);
 
     if (impErr) throw new Error(impErr.message);
 
-    console.log(`[delete-importacion] ✓ Eliminada importación ${importacion.id} (${archivo_nombre}) para empresa ${empresa_id}`);
+    console.log(`[delete-importacion] ✓ Eliminada importación ${importacion_id} (${importacion.nombre_archivo}) para empresa ${empresa_id}`);
 
-    return res.json({ ok: true, eliminado: { importacion_id: importacion.id, archivo_nombre } });
+    return res.json({ ok: true, eliminado: { importacion_id } });
 
   } catch (err) {
     console.error('[delete-importacion] Error:', err.message);
