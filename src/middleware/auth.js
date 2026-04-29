@@ -29,17 +29,17 @@ async function authMiddleware(req, res, next) {
       return res.status(401).json({ ok: false, error: 'Token inválido o expirado' });
     }
 
-    // Obtener empresa_id del usuario desde la tabla usuarios
-    const { data: usuario, error: userError } = await supabase
-      .from('usuarios')
-      .select('empresa_id')
-      .eq('id', user.id)
-      .single();
+    // Obtener empresa_id desde la tabla empresas (owner_id = user.id)
+    const { data: empresa, error: empresaError } = await supabase
+      .from('empresas')
+      .select('id')
+      .eq('owner_id', user.id)
+      .maybeSingle();
 
-    if (userError || !usuario || !usuario.empresa_id) {
+    if (empresaError || !empresa || !empresa.id) {
       return res.status(401).json({
         ok: false,
-        error: 'Usuario no encontrado o sin empresa asociada',
+        error: 'No se encontró empresa asociada a este usuario',
       });
     }
 
@@ -47,7 +47,7 @@ async function authMiddleware(req, res, next) {
     req.auth = {
       user_id:    user.id,
       email:      user.email,
-      empresa_id: usuario.empresa_id,
+      empresa_id: empresa.id,
     };
 
     next();
