@@ -4,6 +4,7 @@ const { procesarExcel } = require('../services/documentProcessor/excelProcessor'
 const { procesarPDF } = require('../services/documentProcessor/pdfProcessor');
 const { categorizarTransacciones } = require('../services/documentProcessor/aiCategorizer');
 const { authMiddleware } = require('../middleware/auth');
+const { esTransaccionDuplicada } = require('./webhooks');
 
 const router = express.Router();
 
@@ -109,18 +110,37 @@ router.post('/process', authMiddleware, async (req, res) => {
     // ── 6. Guardar transacciones en Supabase ──────────────────────────────────
     const BATCH = 100; // insertar en lotes para no exceder límites
     let insertados = 0;
+    let saltadasTotal = 0;
 
     for (let i = 0; i < registros.length; i += BATCH) {
       const lote = registros.slice(i, i + BATCH);
-      const { error: insertError } = await supabase
-        .from('transacciones_historicas')
-        .insert(lote);
 
-      if (insertError) {
-        throw new Error(`Error al guardar transacciones: ${insertError.message}`);
+      // Anti-duplicados: filtrar transacciones que ya existen en BD
+      // Se ejecuta en paralelo con Promise.all para no agregar latencia
+      const checks = await Promise.all(
+        lote.map(tx => esTransaccionDuplicada(supabase, empresa_id, tx))
+      );
+
+      const loteFiltrado = lote.filter((_, idx) => !checks[idx]);
+      const saltadasLote = lote.length - loteFiltrado.length;
+      saltadasTotal += saltadasLote;
+
+      console.log(`[/process] Lote ${Math.floor(i/BATCH)+1}: ${lote.length} total, ${loteFiltrado.length} nuevas, ${saltadasLote} duplicadas saltadas`);
+
+      // Solo insertar si hay transacciones nuevas
+      if (loteFiltrado.length > 0) {
+        const { error: insertError } = await supabase
+          .from('transacciones_historicas')
+          .insert(loteFiltrado);
+
+        if (insertError) {
+          throw new Error(`Error al guardar transacciones: ${insertError.message}`);
+        }
+        insertados += loteFiltrado.length;
       }
-      insertados += lote.length;
     }
+
+    console.log(`[/process] Procesamiento finalizado. Insertadas: ${insertados}, Saltadas (duplicadas): ${saltadasTotal}, Total cartola: ${registros.length}`);
 
     // ── 7. Calcular totales ───────────────────────────────────────────────────
     const totalIngresos = registros

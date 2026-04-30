@@ -322,3 +322,4 @@ router.post('/storage', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.esTransaccionDuplicada = esTransaccionDuplicada;
