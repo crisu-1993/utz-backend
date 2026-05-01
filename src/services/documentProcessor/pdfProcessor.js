@@ -318,52 +318,40 @@ function crearZonasVLines(colMap, fronteras) {
   return zonas;
 }
 
-// Bug #2 fix: pdf2json a veces parte fechas con dígitos repetidos
-// ej: "11" se extrae como "1" + "1/03/2026". Detectamos esto y fusionamos.
+// Bug #2 fix v2: pdf2json a veces parte fechas con dígitos repetidos
+// ej: "11" se extrae como "1" + "1/03/2026". Detectamos por PATRÓN, no por coordenadas.
 function fusionarFechaPartida(items, colMap) {
-  if (!colMap.fecha || !colMap.descripcion) return items;
+  if (items.length < 2) return items;
 
-  // Frontera: a la mitad entre la columna fecha y la columna descripcion
-  const fronteraFechaDesc = (colMap.fecha + colMap.descripcion) / 2;
+  // Ordenar items por x para procesar de izquierda a derecha
+  const ordenados = [...items].sort((a, b) => a.x - b.x);
 
-  // Items en zona fecha (x menor a la frontera), ordenados por x
-  const indicesFecha = [];
-  items.forEach((item, idx) => {
-    if (item.x < fronteraFechaDesc) indicesFecha.push(idx);
-  });
+  // Buscar pares consecutivos (en orden de x) cuyo concatenado forme una fecha
+  for (let i = 0; i < ordenados.length - 1; i++) {
+    const a = ordenados[i];
+    const b = ordenados[i + 1];
 
-  if (indicesFecha.length < 2) return items;
+    // Concatenar SIN espacio
+    const concatenado = a.text + b.text;
 
-  // Concatenar textos sin espacio
-  const textoConcatenado = indicesFecha.map(i => items[i].text).join('');
+    // ¿El resultado matchea una fecha completa?
+    if (FECHA_TOKEN_RE.test(concatenado)) {
+      // Validación adicional: el primer item debe ser corto (1-2 chars de dígito)
+      // y el segundo debe empezar con dígito (no con un texto cualquiera)
+      if (/^\d{1,2}$/.test(a.text) && /^\d/.test(b.text)) {
+        console.log(`[PDF-FIX-FECHA] Fusionando items partidos: ["${a.text}", "${b.text}"] → "${concatenado}"`);
 
-  // ¿Forma una fecha válida?
-  if (!FECHA_TOKEN_RE.test(textoConcatenado)) return items;
+        const itemFusionado = { x: a.x, text: concatenado };
 
-  // Sí matchea → fusionar
-  console.log(`[PDF-FIX-FECHA] Fusionando items partidos: [${indicesFecha.map(i => `"${items[i].text}"`).join(', ')}] → "${textoConcatenado}"`);
-
-  const itemFusionado = {
-    x: items[indicesFecha[0]].x,
-    text: textoConcatenado
-  };
-
-  // Construir nuevo array: reemplazar los items de zona fecha por el fusionado
-  const nuevoItems = [];
-  let yaInsertado = false;
-  items.forEach((item, idx) => {
-    if (indicesFecha.includes(idx)) {
-      if (!yaInsertado) {
+        // Construir nuevo array sin los 2 items fusionados, agregando el nuevo
+        const nuevoItems = items.filter(it => it !== a && it !== b);
         nuevoItems.push(itemFusionado);
-        yaInsertado = true;
+        return nuevoItems;
       }
-      // los demás items de zona fecha se omiten (ya están fusionados)
-    } else {
-      nuevoItems.push(item);
     }
-  });
+  }
 
-  return nuevoItems;
+  return items; // sin cambios si no encontró fecha partida
 }
 
 function asignarPorZona(fila, zonas, filaNum = 0) {
