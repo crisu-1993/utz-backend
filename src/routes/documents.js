@@ -4,7 +4,7 @@ const { procesarExcel } = require('../services/documentProcessor/excelProcessor'
 const { procesarPDF } = require('../services/documentProcessor/pdfProcessor');
 const { categorizarTransacciones } = require('../services/documentProcessor/aiCategorizer');
 const { authMiddleware } = require('../middleware/auth');
-const { esTransaccionDuplicada } = require('./webhooks');
+const { esTransaccionDuplicada, contarTransaccionesEnBD, contarOcurrenciasEnLote } = require('./webhooks');
 
 const router = express.Router();
 
@@ -115,13 +115,16 @@ router.post('/process', authMiddleware, async (req, res) => {
     for (let i = 0; i < registros.length; i += BATCH) {
       const lote = registros.slice(i, i + BATCH);
 
-      // Anti-duplicados: filtrar transacciones que ya existen en BD
-      // Se ejecuta en paralelo con Promise.all para no agregar latencia
+      // Anti-duplicados: conteo PDF vs BD (resuelve race condition y docto null)
       const checks = await Promise.all(
-        lote.map(tx => esTransaccionDuplicada(supabase, empresa_id, tx))
+        lote.map(async tx => {
+          const ocurrenciasEnPDF = contarOcurrenciasEnLote(registros, tx);
+          const ocurrenciasEnBD  = await contarTransaccionesEnBD(supabase, empresa_id, tx);
+          return { tx, esDuplicado: ocurrenciasEnBD >= ocurrenciasEnPDF };
+        })
       );
 
-      const loteFiltrado = lote.filter((_, idx) => !checks[idx]);
+      const loteFiltrado = checks.filter(c => !c.esDuplicado).map(c => c.tx);
       const saltadasLote = lote.length - loteFiltrado.length;
       saltadasTotal += saltadasLote;
 

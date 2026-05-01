@@ -101,18 +101,22 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
       }];
     });
 
-    // 6. Insertar uno a uno verificando duplicados
+    // 6. Insertar uno a uno verificando duplicados (conteo PDF vs BD)
     let insertados = 0;
     let duplicados = 0;
     for (const registro of registros) {
-      const duplicado = await esTransaccionDuplicada(supabase, empresaId, registro);
-      if (duplicado) {
+      const ocurrenciasEnPDF = contarOcurrenciasEnLote(registros, registro);
+      const ocurrenciasEnBD  = await contarTransaccionesEnBD(supabase, empresaId, registro);
+
+      // Si BD ya tiene tantas como el PDF dice, es duplicado
+      if (ocurrenciasEnBD >= ocurrenciasEnPDF) {
         duplicados++;
         continue;
       }
+
       const { error } = await supabase.from('transacciones_historicas').insert([registro]);
       if (error) {
-        console.log('[webhook] falla registro:', JSON.stringify({ monto: registro.monto_original, confianza: registro.confianza_deteccion, desc: registro.descripcion_original }));
+        console.log('[webhook] falla registro:', registro.fecha_transaccion, registro.descripcion_original);
         console.log('[webhook] error:', error.message);
       } else {
         insertados++;
@@ -162,17 +166,48 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
 }
 
 // ─── Validación anti-duplicados a nivel de transacción ───────────────────────
-async function esTransaccionDuplicada(supabase, empresaId, tx) {
-  const { data } = await supabase
+
+// Cuenta cuántas transacciones idénticas existen ya en BD.
+// Maneja correctamente numero_documento = null (usa .is() no .eq())
+async function contarTransaccionesEnBD(supabase, empresaId, tx) {
+  let query = supabase
     .from('transacciones_historicas')
-    .select('id')
+    .select('id', { count: 'exact', head: true })
     .eq('empresa_id', empresaId)
     .eq('fecha_transaccion', tx.fecha_transaccion)
     .eq('monto_original', tx.monto_original)
-    .eq('tipo', tx.tipo)
-    .eq('numero_documento', tx.numero_documento || '000000000')
-    .limit(1);
-  return data && data.length > 0;
+    .eq('tipo', tx.tipo);
+
+  // CRÍTICO: cuando docto es null/undefined, usar .is('numero_documento', null)
+  // .eq() con null no funciona en Postgres (SQL: NULL = NULL es false)
+  if (tx.numero_documento) {
+    query = query.eq('numero_documento', tx.numero_documento);
+  } else {
+    query = query.is('numero_documento', null);
+  }
+
+  const { count, error } = await query;
+  if (error) {
+    console.error('[contarTransaccionesEnBD] Error:', error.message);
+    return 0; // en caso de error, asumir 0 (insertar) para no perder datos
+  }
+  return count || 0;
+}
+
+// Wrapper para compatibilidad: devuelve true si hay al menos 1 en BD (legacy)
+async function esTransaccionDuplicada(supabase, empresaId, tx) {
+  const count = await contarTransaccionesEnBD(supabase, empresaId, tx);
+  return count > 0;
+}
+
+// Helper: cuenta cuántas veces aparece una tx idéntica en el lote (PDF)
+function contarOcurrenciasEnLote(lote, tx) {
+  return lote.filter(r =>
+    r.fecha_transaccion === tx.fecha_transaccion &&
+    r.monto_original === tx.monto_original &&
+    r.tipo === tx.tipo &&
+    (r.numero_documento || null) === (tx.numero_documento || null)
+  ).length;
 }
 
 // ─── POST /api/webhooks/storage ───────────────────────────────────────────────
@@ -321,4 +356,6 @@ router.post('/storage', async (req, res) => {
 });
 
 module.exports = router;
-module.exports.esTransaccionDuplicada = esTransaccionDuplicada;
+module.exports.esTransaccionDuplicada    = esTransaccionDuplicada;
+module.exports.contarTransaccionesEnBD   = contarTransaccionesEnBD;
+module.exports.contarOcurrenciasEnLote   = contarOcurrenciasEnLote;
