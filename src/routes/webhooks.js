@@ -107,7 +107,6 @@ async function procesarDocumento({ supabase, empresaId, bucketName, filePath, im
     for (const registro of registros) {
       const duplicado = await esTransaccionDuplicada(supabase, empresaId, registro);
       if (duplicado) {
-        console.log(`[WEBHOOK] transacción duplicada omitida: ${registro.fecha_transaccion} ${registro.tipo} ${registro.monto_original} docto:${registro.numero_documento}`);
         duplicados++;
         continue;
       }
