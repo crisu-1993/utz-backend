@@ -430,6 +430,64 @@ router.get('/results/:empresa_id', async (req, res) => {
   }
 });
 
+// ─── GET /api/documents/status ────────────────────────────────────────────────
+// Endpoint para polling del frontend: consulta estado de UNA importación específica.
+// Filtra por empresa del token (seguro). NO usa :empresa_id en path.
+router.get('/status', authMiddleware, async (req, res) => {
+  try {
+    const { empresa_id } = req.auth;
+    const { importacion_id, storage_path } = req.query;
+
+    if (!importacion_id && !storage_path) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Se requiere importacion_id o storage_path como query param'
+      });
+    }
+
+    const supabase = getSupabase();
+
+    let query = supabase
+      .from('importaciones_historicas')
+      .select('id, estado, total_transacciones, total_ingresos, total_egresos, fecha_fin_procesamiento, error_mensaje, storage_path')
+      .eq('empresa_id', empresa_id);
+
+    if (importacion_id) {
+      query = query.eq('id', importacion_id);
+    } else {
+      query = query.eq('storage_path', storage_path);
+    }
+
+    // Tomar la más reciente si hay múltiples (caso edge)
+    query = query.order('created_at', { ascending: false }).limit(1).maybeSingle();
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('[/status] Error consultando importación:', error.message);
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+
+    if (!data) {
+      return res.status(404).json({ ok: false, error: 'Importación no encontrada' });
+    }
+
+    return res.json({
+      ok: true,
+      estado: data.estado,
+      total_transacciones: data.total_transacciones || 0,
+      total_ingresos: data.total_ingresos || 0,
+      total_egresos: data.total_egresos || 0,
+      fecha_fin_procesamiento: data.fecha_fin_procesamiento,
+      error_mensaje: data.error_mensaje,
+      storage_path: data.storage_path
+    });
+  } catch (err) {
+    console.error('[/status] Error:', err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── GET /api/documents/status/:empresa_id ───────────────────────────────────
 // Retorna el estado actual del procesamiento y un resumen de la última importación.
 router.get('/status/:empresa_id', async (req, res) => {
