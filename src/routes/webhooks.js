@@ -290,21 +290,38 @@ router.post('/storage', async (req, res) => {
   const nombreLimpio = nombreArchivo.replace(/^\d+-/, '');
 
   // ── Buscar registro existente creado por el frontend ───────────────────────
-  const { data: existente } = await supabase
+  // Estrategia 1: por storage_path exacto en cualquier estado (excepto 'error')
+  // storage_path incluye timestamp → match preciso al archivo concreto subido
+  let { data: existente } = await supabase
     .from('importaciones_historicas')
     .select('id, estado')
     .eq('empresa_id', empresaRealId)
-    .eq('nombre_archivo', nombreLimpio)
-    .in('estado', ['pendiente', 'subiendo'])
-    .order('fecha_subida', { ascending: false })
+    .eq('storage_path', filePath)
+    .neq('estado', 'error')
+    .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  // Estrategia 2 (fallback): por nombre_archivo + estado pendiente/subiendo/procesando
+  // Cubre el caso en que /process todavía no escribió storage_path
+  if (!existente) {
+    const { data: existentePorNombre } = await supabase
+      .from('importaciones_historicas')
+      .select('id, estado')
+      .eq('empresa_id', empresaRealId)
+      .eq('nombre_archivo', nombreLimpio)
+      .in('estado', ['pendiente', 'subiendo', 'procesando'])
+      .order('fecha_subida', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    existente = existentePorNombre;
+  }
 
   let importacionId;
 
   if (existente) {
-    // Encontrado: actualizar storage_path y reusar el id del frontend
-    console.log(`[WEBHOOK] registro existente encontrado (id=${existente.id}), actualizando storage_path`);
+    console.log(`[WEBHOOK] reutilizando importación existente ${existente.id} (estado: ${existente.estado})`);
+    // Actualizar storage_path por si vino del fallback
     await supabase
       .from('importaciones_historicas')
       .update({ archivo_path: filePath, storage_path: filePath })

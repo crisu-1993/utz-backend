@@ -139,7 +139,12 @@ router.post('/process', authMiddleware, async (req, res) => {
     if (importacion_id) {
       await supabase
         .from('importaciones_historicas')
-        .update({ estado: 'procesando', fecha_inicio_procesamiento: new Date().toISOString() })
+        .update({
+          estado: 'procesando',
+          fecha_inicio_procesamiento: new Date().toISOString(),
+          storage_path: archivo_id,  // para que webhook pueda encontrar esta importación
+          archivo_path: archivo_id,  // redundante pero consistente con webhook
+        })
         .eq('id', importacion_id);
     }
 
