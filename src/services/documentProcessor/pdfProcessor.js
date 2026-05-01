@@ -92,12 +92,22 @@ function parsearMonto(str) {
   if (!str) return null;
   let s = String(str).trim();
   if (s.startsWith('(') && s.endsWith(')')) s = s.slice(1, -1);  // valor absoluto
-  // [DIAG] TEMPORAL — detectar espacios internos (Bug #1)
+
+  // Bug #1 fix: si hay espacio entre dígitos, tomar el grupo MÁS LARGO.
+  // Esto evita que el último dígito del numero_documento se pegue al monto real.
+  // Ej: "1 9.080" (docto + monto) → tomar "9.080" → 9080 (correcto)
+  //     vs antes: replace(/\s/) → "19.080" → 19080 (inflado)
   if (/\d\s+\d/.test(s)) {
-    console.log(`[DIAG-BUG1] parsearMonto recibió string con espacio interno: "${s}"`);
+    const grupos = s.split(/\s+/).filter(g => g.length > 0);
+    // Tomar el grupo con más caracteres (el monto real es siempre más largo
+    // que un dígito huérfano del docto que se coló de otra columna)
+    const grupoMasLargo = grupos.reduce((a, b) => a.length >= b.length ? a : b);
+    console.log(`[PDF-FIX-MONTO] String partido: "${s}" → grupos=[${grupos.map(g => `"${g}"`).join(', ')}] → tomando "${grupoMasLargo}"`);
+    s = grupoMasLargo;
   }
+
   const limpio = s
-    .replace(/[$\s]/g, '')   // quitar $ y espacios
+    .replace(/[$\s]/g, '')   // quitar $ y espacios (por si quedó alguno)
     .replace(/\./g, '')      // quitar separadores de miles
     .replace(',', '.');      // coma decimal → punto
   const num = parseFloat(limpio);
