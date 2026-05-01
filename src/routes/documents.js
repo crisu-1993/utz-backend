@@ -25,6 +25,96 @@ function detectarTipo(nombreArchivo) {
   return null;
 }
 
+/**
+ * Reconcilia duplicados dentro de una importación.
+ * Compara cuántas transacciones idénticas hay en BD vs cuántas hay en el PDF original.
+ * Si BD tiene más que PDF, elimina las más recientes hasta igualar.
+ *
+ * Esto resuelve el race condition: cuando webhook y /process insertan la misma tx
+ * en paralelo, ambos ven que no existe y la insertan, dejando 2 en BD.
+ *
+ * NO toca transacciones de OTRAS importaciones — solo la indicada.
+ *
+ * @returns {Promise<{eliminadas: number, gruposReconciliados: number}>}
+ */
+async function reconciliarDuplicados(supabase, importacionId, registrosPDF) {
+  if (!importacionId) {
+    console.log('[RECONCILIAR] sin importacion_id, saltando reconciliación');
+    return { eliminadas: 0, gruposReconciliados: 0 };
+  }
+
+  // 1. Contar ocurrencias en PDF (cuántas veces aparece cada combinación única)
+  const cuentasPDF = {};
+  for (const r of registrosPDF) {
+    const docto = r.numero_documento || 'NULL';
+    const clave = `${r.fecha_transaccion}|${r.monto_original}|${r.tipo}|${docto}`;
+    cuentasPDF[clave] = (cuentasPDF[clave] || 0) + 1;
+  }
+
+  let eliminadasTotal = 0;
+  let gruposReconciliados = 0;
+
+  // 2. Para cada clave única en PDF, ver cuántas hay en BD
+  for (const [clave, esperado] of Object.entries(cuentasPDF)) {
+    const [fecha, monto, tipo, docto] = clave.split('|');
+
+    let query = supabase
+      .from('transacciones_historicas')
+      .select('id, created_at')
+      .eq('importacion_id', importacionId)
+      .eq('fecha_transaccion', fecha)
+      .eq('monto_original', parseFloat(monto))
+      .eq('tipo', tipo);
+
+    // Manejo correcto de NULL en numero_documento
+    if (docto === 'NULL') {
+      query = query.is('numero_documento', null);
+    } else {
+      query = query.eq('numero_documento', docto);
+    }
+
+    // Ordenar por created_at DESC: los más recientes primero
+    query = query.order('created_at', { ascending: false });
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error(`[RECONCILIAR] Error consultando ${clave}:`, error.message);
+      continue;
+    }
+
+    if (!data) continue;
+
+    // 3. Si BD tiene más que el PDF dice, eliminar el exceso (los más recientes)
+    if (data.length > esperado) {
+      const exceso = data.length - esperado;
+      const idsAEliminar = data.slice(0, exceso).map(t => t.id);
+
+      const { error: errorDelete } = await supabase
+        .from('transacciones_historicas')
+        .delete()
+        .in('id', idsAEliminar);
+
+      if (errorDelete) {
+        console.error(`[RECONCILIAR] Error eliminando ${idsAEliminar.length} filas:`, errorDelete.message);
+        continue;
+      }
+
+      console.log(`[RECONCILIAR] ${clave}: BD=${data.length}, PDF=${esperado}, eliminadas ${exceso} (ids: ${idsAEliminar.join(', ')})`);
+      eliminadasTotal += exceso;
+      gruposReconciliados++;
+    }
+  }
+
+  if (eliminadasTotal > 0) {
+    console.log(`[RECONCILIAR] Total: ${eliminadasTotal} duplicados eliminados de ${gruposReconciliados} grupos`);
+  } else {
+    console.log(`[RECONCILIAR] Sin duplicados detectados (${Object.keys(cuentasPDF).length} grupos verificados)`);
+  }
+
+  return { eliminadas: eliminadasTotal, gruposReconciliados };
+}
+
 // ─── POST /api/documents/process ─────────────────────────────────────────────
 // Requiere Authorization: Bearer <token de Supabase>
 // El empresa_id se obtiene del token autenticado; no se toma del body.
@@ -172,6 +262,24 @@ router.post('/process', authMiddleware, async (req, res) => {
     const tiempoMs = Date.now() - inicio;
     console.log(`[documentos] ✓ ${insertados} transacciones guardadas en ${tiempoMs}ms`);
 
+    // Reconciliación: eliminar duplicados creados por race condition con webhook
+    const reconciliacion = await reconciliarDuplicados(supabase, importacion_id, registros);
+
+    // Si se eliminaron duplicados, recalcular total_transacciones de la importación
+    if (reconciliacion.eliminadas > 0 && importacion_id) {
+      const { count } = await supabase
+        .from('transacciones_historicas')
+        .select('id', { count: 'exact', head: true })
+        .eq('importacion_id', importacion_id);
+
+      await supabase
+        .from('importaciones_historicas')
+        .update({ total_transacciones: count || 0 })
+        .eq('id', importacion_id);
+
+      console.log(`[RECONCILIAR] total_transacciones actualizado a ${count} en importación ${importacion_id}`);
+    }
+
     return res.json({
       ok: true,
       resumen: {
@@ -181,6 +289,7 @@ router.post('/process', authMiddleware, async (req, res) => {
         total_ingresos:       totalIngresos,
         total_egresos:        totalEgresos,
         tiempo_ms:            tiempoMs,
+        duplicados_eliminados: reconciliacion.eliminadas,
       },
       ejemplo_transaccion: registros[0] || null,
     });
