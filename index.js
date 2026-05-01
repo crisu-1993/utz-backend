@@ -26,6 +26,7 @@ app.use('/api/webhooks',          require('./src/routes/webhooks'));
 app.use('/api/estado-resultados', require('./src/routes/estadoResultados'));
 app.use('/api/resumen',           require('./src/routes/resumen'));
 app.use('/api/score',             require('./src/routes/score'));
+app.use('/api/insights',          require('./src/routes/insights'));
 
 app.listen(PORT, () => {
   console.log(`UTZ Backend escuchando en http://localhost:${PORT}`);
