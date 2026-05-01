@@ -92,6 +92,10 @@ function parsearMonto(str) {
   if (!str) return null;
   let s = String(str).trim();
   if (s.startsWith('(') && s.endsWith(')')) s = s.slice(1, -1);  // valor absoluto
+  // [DIAG] TEMPORAL — detectar espacios internos (Bug #1)
+  if (/\d\s+\d/.test(s)) {
+    console.log(`[DIAG-BUG1] parsearMonto recibió string con espacio interno: "${s}"`);
+  }
   const limpio = s
     .replace(/[$\s]/g, '')   // quitar $ y espacios
     .replace(/\./g, '')      // quitar separadores de miles
@@ -133,19 +137,23 @@ function inferirTipo(desc) {
 
 // P5 — Devuelve true si la fila contiene las palabras del encabezado
 //      (≥ 3 columnas distintas reconocidas → es un encabezado repetido)
-function esEncabezadoRepetido(fila) {
+function esEncabezadoRepetido(fila, devolverDetalles = false) {
   const encontradas = new Set();
+  const matches = [];
   for (const item of fila.items) {
     const norm = normText(item.text);
     for (const [col, aliases] of Object.entries(COL_ALIASES)) {
       if (!encontradas.has(col) &&
           aliases.some(a => norm === a || norm.startsWith(a + ' '))) {
         encontradas.add(col);
+        matches.push({ col, text: item.text });
       }
     }
-    if (encontradas.size >= 3) return true;
+    if (encontradas.size >= 3) {
+      return devolverDetalles ? { es: true, matches } : true;
+    }
   }
-  return false;
+  return devolverDetalles ? { es: false, matches: [] } : false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -377,6 +385,10 @@ async function parsearPDF(buffer) {
 
   const filas = agruparEnFilas(items);
   console.log(`[PDF] Filas agrupadas: ${filas.length}`);
+  // [DIAG] TEMPORAL — distribución de filas por página
+  const filasPorPagina = {};
+  filas.forEach(f => { filasPorPagina[f.page] = (filasPorPagina[f.page] || 0) + 1; });
+  console.log(`[DIAG] Distribución por página:`, JSON.stringify(filasPorPagina));
 
   const header = detectarEncabezado(filas);
   if (!header) {
@@ -407,8 +419,10 @@ async function parsearPDF(buffer) {
     if (fila.page < header.headerPage) continue;
 
     // ── P5: Encabezado repetido ────────────────────────────────────────────────
-    if (esEncabezadoRepetido(fila)) {
-      console.log(`[PDF-SKIP] fila ${i}: encabezado repetido`);
+    const enc = esEncabezadoRepetido(fila, true);
+    if (enc.es) {
+      const textosFila = fila.items.map(it => it.text).join(' | ');
+      console.log(`[PDF-SKIP] fila ${i} pág=${fila.page} y=${fila.y.toFixed(2)}: encabezado repetido | matches=${JSON.stringify(enc.matches)} | items="${textosFila}"`);
       skipped.encabezadoRep++;
       continue;
     }
@@ -422,6 +436,9 @@ async function parsearPDF(buffer) {
     const fechaStr = (celdas.fecha || '').trim();
 
     if (!fechaStr) {
+      const textosFila = fila.items.map(it => it.text).join(' | ');
+      const fusionada = filaAnterior && celdas.descripcion;
+      console.log(`[DIAG] fila ${i} pág=${fila.page} y=${fila.y.toFixed(2)} SIN FECHA, ${fusionada ? 'fusionada con anterior' : 'descartada silenciosa'} | celdas=${JSON.stringify(celdas)} | items="${textosFila}"`);
       // Fila sin fecha → posible continuación de descripción (Itaú, multi-línea)
       if (filaAnterior && celdas.descripcion) {
         filaAnterior.descripcion_original += ' ' + celdas.descripcion.trim();
@@ -432,14 +449,14 @@ async function parsearPDF(buffer) {
     }
 
     if (!esFechaValida(fechaStr)) {
-      console.log(`[PDF-SKIP] fila ${i}: sin fecha válida → "${fechaStr}"`);
+      console.log(`[PDF-SKIP] fila ${i} pág=${fila.page} y=${fila.y.toFixed(2)}: sin fecha válida → "${fechaStr}" | celdas=${JSON.stringify(celdas)}`);
       skipped.sinFecha++;
       continue;
     }
 
     const fecha = normalizarFecha(fechaStr);
     if (!fecha) {
-      console.log(`[PDF-SKIP] fila ${i}: sin fecha válida → "${fechaStr}"`);
+      console.log(`[PDF-SKIP] fila ${i} pág=${fila.page} y=${fila.y.toFixed(2)}: sin fecha válida → "${fechaStr}" | celdas=${JSON.stringify(celdas)}`);
       skipped.sinFecha++;
       continue;
     }
@@ -448,7 +465,7 @@ async function parsearPDF(buffer) {
     const descripcion = (celdas.descripcion || '').trim();
     if (descripcion.length < 3 || /^\d+$/.test(descripcion) ||
         SKIP_DESC_RE.test(normText(descripcion))) {
-      console.log(`[PDF-SKIP] fila ${i}: descripción inválida → "${descripcion}"`);
+      console.log(`[PDF-SKIP] fila ${i} pág=${fila.page} y=${fila.y.toFixed(2)}: descripción inválida → "${descripcion}" | fecha="${fechaStr}"`);
       skipped.descInvalida++;
       continue;
     }
@@ -473,7 +490,7 @@ async function parsearPDF(buffer) {
 
     // ── P2: Filtro de monto ─────────────────────────────────────────────────────
     if (!monto || monto <= 0) {
-      console.log(`[PDF-SKIP] fila ${i}: sin monto válido`);
+      console.log(`[PDF-SKIP] fila ${i} pág=${fila.page} y=${fila.y.toFixed(2)}: sin monto válido | fecha="${fechaStr}" desc="${descripcion}" | celdas=${JSON.stringify(celdas)}`);
       skipped.sinMonto++;
       continue;
     }
