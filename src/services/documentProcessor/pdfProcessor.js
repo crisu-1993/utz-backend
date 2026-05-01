@@ -114,6 +114,98 @@ function parsearMonto(str) {
   return (isNaN(num) || num < 0) ? null : num;
 }
 
+// Parsea un valor de SALDO. A diferencia de parsearMonto, cuando hay espacio
+// entre dígitos hace UNIÓN (no toma grupo más largo) porque el saldo nunca
+// se mezcla con dígitos huérfanos del docto (el docto está antes en el PDF).
+// Ej: "307.21 1" → unión "307.211" → 307211 ✓
+//     "1.1 19.157" → unión "1.119.157" → 1119157 ✓
+function parsearSaldo(str) {
+  if (!str) return null;
+  let s = String(str).trim();
+  if (s.startsWith('(') && s.endsWith(')')) s = s.slice(1, -1);
+
+  // Para saldo: si hay espacio entre dígitos, UNIR todo (no tomar grupo más largo)
+  if (/\d\s+\d/.test(s)) {
+    console.log(`[PDF-FIX-SALDO] String partido: "${s}" → unión sin espacio`);
+  }
+
+  const limpio = s
+    .replace(/[$\s]/g, '')   // quitar $ y TODOS los espacios (unión)
+    .replace(/\./g, '')      // quitar separadores de miles
+    .replace(',', '.');      // coma decimal → punto
+  const num = parseFloat(limpio);
+  return (isNaN(num) || num < 0) ? null : num;
+}
+
+// Parsea un MONTO usando el saldo para validar cuando hay ambigüedad.
+// Si el string tiene espacio entre dígitos, calcula AMBAS interpretaciones
+// (grupo más largo y unión) y elige la que coincida con la diferencia de saldos.
+//
+// saldoAnterior y saldoPosterior pueden ser null (caso primera fila o saldo no parseable).
+// tipo es 'egreso' o 'ingreso' (afecta dirección de la diferencia).
+//
+// Si no hay saldos disponibles, hace fallback a parsearMonto (grupo más largo).
+function parsearMontoConValidacion(str, saldoAnterior, saldoPosterior, tipo) {
+  if (!str) return null;
+  let s = String(str).trim();
+  if (s.startsWith('(') && s.endsWith(')')) s = s.slice(1, -1);
+
+  // Caso simple: no hay espacio interno → comportamiento normal
+  if (!/\d\s+\d/.test(s)) {
+    const limpio = s.replace(/[$\s]/g, '').replace(/\./g, '').replace(',', '.');
+    const num = parseFloat(limpio);
+    return (isNaN(num) || num < 0) ? null : num;
+  }
+
+  // Caso ambiguo: hay espacio entre dígitos
+  const grupos = s.split(/\s+/).filter(g => g.length > 0);
+
+  // Calcular las 2 interpretaciones posibles
+  const interpretarComoGrupo = (txt) => {
+    const limpio = txt.replace(/[$\s]/g, '').replace(/\./g, '').replace(',', '.');
+    const n = parseFloat(limpio);
+    return (isNaN(n) || n < 0) ? null : n;
+  };
+
+  const grupoMasLargo = grupos.reduce((a, b) => a.length >= b.length ? a : b);
+  const opcionA = interpretarComoGrupo(grupoMasLargo);  // ej: "1 1.000" → 1000
+  const opcionB = interpretarComoGrupo(grupos.join('')); // ej: "1 1.000" → 11000
+
+  // Si tenemos los 2 saldos, validar contra la diferencia
+  if (saldoAnterior !== null && saldoPosterior !== null) {
+    // Para egreso: monto = saldoAnterior - saldoPosterior
+    // Para ingreso: monto = saldoPosterior - saldoAnterior
+    const diferencia = tipo === 'egreso'
+      ? saldoAnterior - saldoPosterior
+      : saldoPosterior - saldoAnterior;
+
+    // Tolerancia de 1 peso por errores de redondeo
+    const coincideA = Math.abs(opcionA - diferencia) <= 1;
+    const coincideB = Math.abs(opcionB - diferencia) <= 1;
+
+    if (coincideA && !coincideB) {
+      console.log(`[PDF-FIX-MONTO-VALID] "${s}" → A=$${opcionA} ✓ vs B=$${opcionB} (saldo dice $${diferencia})`);
+      return opcionA;
+    }
+    if (coincideB && !coincideA) {
+      console.log(`[PDF-FIX-MONTO-VALID] "${s}" → B=$${opcionB} ✓ vs A=$${opcionA} (saldo dice $${diferencia})`);
+      return opcionB;
+    }
+    if (coincideA && coincideB) {
+      // Ambos coinciden (caso raro) → preferir el más largo (comportamiento original)
+      console.log(`[PDF-FIX-MONTO-VALID] "${s}" → AMBAS coinciden, eligiendo A=$${opcionA}`);
+      return opcionA;
+    }
+    // Ninguna coincide → log warning y usar el más largo (fallback)
+    console.log(`[PDF-FIX-MONTO-VALID] "${s}" → NINGUNA coincide con saldo $${diferencia} (A=$${opcionA}, B=$${opcionB}). Usando A.`);
+    return opcionA;
+  }
+
+  // Sin saldos disponibles: fallback al grupo más largo (comportamiento Bug #1 fix)
+  console.log(`[PDF-FIX-MONTO] "${s}" → SIN SALDOS, fallback grupo más largo: $${opcionA}`);
+  return opcionA;
+}
+
 // P1 — Valida que el string sea exactamente una fecha en formato conocido
 function esFechaValida(str) {
   return FORMATOS_FECHA.some(re => re.test((str || '').trim()));
@@ -526,15 +618,22 @@ async function parsearPDF(buffer) {
 
     // ── Regla inviolable: columna → tipo ──────────────────────────────────────
     // La IA NUNCA decide esto. Solo la posición de la columna.
-    const vCargo = parsearMonto(celdas.cargos);
-    const vAbono = parsearMonto(celdas.abonos);
+    const saldo_posterior = parsearSaldo(celdas.saldo);
+    const saldo_anterior = filaAnterior ? filaAnterior.saldo_posterior : null;
 
-    let cargo = 0, abono = 0, monto = null, tipo = null;
+    const cargosTieneValor = celdas.cargos && /\d/.test(celdas.cargos);
+    const abonosTieneValor = celdas.abonos && /\d/.test(celdas.abonos);
 
-    if (vCargo && vCargo > 0) {
-      cargo = vCargo; monto = vCargo; tipo = 'egreso';
-    } else if (vAbono && vAbono > 0) {
-      abono = vAbono; monto = vAbono; tipo = 'ingreso';
+    let monto = null, tipo = null, cargo = 0, abono = 0;
+
+    if (cargosTieneValor) {
+      tipo = 'egreso';
+      monto = parsearMontoConValidacion(celdas.cargos, saldo_anterior, saldo_posterior, tipo);
+      if (monto && monto > 0) cargo = monto;
+    } else if (abonosTieneValor) {
+      tipo = 'ingreso';
+      monto = parsearMontoConValidacion(celdas.abonos, saldo_anterior, saldo_posterior, tipo);
+      if (monto && monto > 0) abono = monto;
     }
 
     // ── P2: Filtro de monto ─────────────────────────────────────────────────────
@@ -543,9 +642,6 @@ async function parsearPDF(buffer) {
       skipped.sinMonto++;
       continue;
     }
-
-    // ── P4: Saldo posterior ─────────────────────────────────────────────────────
-    const saldo_posterior = parsearMonto(celdas.saldo) || null;
 
     // ── Construir transacción ───────────────────────────────────────────────────
     const tx = {
