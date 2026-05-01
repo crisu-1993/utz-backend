@@ -318,6 +318,54 @@ function crearZonasVLines(colMap, fronteras) {
   return zonas;
 }
 
+// Bug #2 fix: pdf2json a veces parte fechas con dígitos repetidos
+// ej: "11" se extrae como "1" + "1/03/2026". Detectamos esto y fusionamos.
+function fusionarFechaPartida(items, colMap) {
+  if (!colMap.fecha || !colMap.descripcion) return items;
+
+  // Frontera: a la mitad entre la columna fecha y la columna descripcion
+  const fronteraFechaDesc = (colMap.fecha + colMap.descripcion) / 2;
+
+  // Items en zona fecha (x menor a la frontera), ordenados por x
+  const indicesFecha = [];
+  items.forEach((item, idx) => {
+    if (item.x < fronteraFechaDesc) indicesFecha.push(idx);
+  });
+
+  if (indicesFecha.length < 2) return items;
+
+  // Concatenar textos sin espacio
+  const textoConcatenado = indicesFecha.map(i => items[i].text).join('');
+
+  // ¿Forma una fecha válida?
+  if (!FECHA_TOKEN_RE.test(textoConcatenado)) return items;
+
+  // Sí matchea → fusionar
+  console.log(`[PDF-FIX-FECHA] Fusionando items partidos: [${indicesFecha.map(i => `"${items[i].text}"`).join(', ')}] → "${textoConcatenado}"`);
+
+  const itemFusionado = {
+    x: items[indicesFecha[0]].x,
+    text: textoConcatenado
+  };
+
+  // Construir nuevo array: reemplazar los items de zona fecha por el fusionado
+  const nuevoItems = [];
+  let yaInsertado = false;
+  items.forEach((item, idx) => {
+    if (indicesFecha.includes(idx)) {
+      if (!yaInsertado) {
+        nuevoItems.push(itemFusionado);
+        yaInsertado = true;
+      }
+      // los demás items de zona fecha se omiten (ya están fusionados)
+    } else {
+      nuevoItems.push(item);
+    }
+  });
+
+  return nuevoItems;
+}
+
 function asignarPorZona(fila, zonas, filaNum = 0) {
   const celdas = {};
   for (const item of fila.items) {
@@ -428,6 +476,9 @@ async function parsearPDF(buffer) {
     }
 
     // ── Asignar columnas ────────────────────────────────────────────────────────
+    // Bug #2 fix: fusionar items en zona fecha si forman una fecha partida
+    fila.items = fusionarFechaPartida(fila.items, header.colMap);
+
     const celdas = usaVLines
       ? asignarPorZona(fila, zonas, i)
       : asignarPorDistancia(fila, header.colMap, i);
