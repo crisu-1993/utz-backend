@@ -24,13 +24,38 @@ router.get('/:empresa_id', async (req, res) => {
 
   let rango, rangoAnt, periodo;
 
-  if (req.query.inicio || req.query.fecha_inicio) {
-    // Formato 2: ?inicio=2026-03-01&fin=2026-03-31 o ?fecha_inicio=...&fecha_fin=...
+  console.log('[/api/resumen] req:', {
+    empresa_id: req.params.empresa_id,
+    fecha_inicio: req.query.fecha_inicio,
+    fecha_fin: req.query.fecha_fin,
+    inicio: req.query.inicio,
+    fin: req.query.fin,
+    mes: req.query.mes,
+    anio: req.query.anio,
+    periodo: req.query.periodo,
+  });
+
+  if (req.query.fecha_inicio && req.query.fecha_fin) {
+    // PRIORIDAD: fechas explícitas → usarlas directamente sin derivar nada
+    rango = {
+      fecha_inicio: req.query.fecha_inicio,
+      fecha_fin:    req.query.fecha_fin,
+    };
+    // rangoAnt: mismo rango desplazado hacia atrás por la misma duración
+    const msInicio = new Date(req.query.fecha_inicio).getTime();
+    const msFin    = new Date(req.query.fecha_fin).getTime();
+    const durMs    = msFin - msInicio + 86400000; // +1 día (rango inclusivo)
+    rangoAnt = {
+      fecha_inicio: new Date(msInicio - durMs).toISOString().split('T')[0],
+      fecha_fin:    new Date(msFin    - durMs).toISOString().split('T')[0],
+    };
+    periodo = 'custom';
+  } else if (req.query.inicio || req.query.fecha_inicio) {
+    // Formato legado: solo fecha de inicio → extraer mes y calcular rango mensual
     const raw   = req.query.inicio || req.query.fecha_inicio;
     const fecha = new Date(raw);
     const mes   = fecha.getMonth() + 1;
     const anio  = fecha.getFullYear();
-    console.log('[RESUMEN] params recibidos:', req.query.mes, req.query.anio, raw);
     rango    = calcularRangoMes(anio, mes);
     rangoAnt = calcularRangoMes(mes === 1 ? anio - 1 : anio, mes === 1 ? 12 : mes - 1);
     periodo  = 'mes';
