@@ -266,10 +266,15 @@ router.post('/storage', async (req, res) => {
 
   // ── Buscar empresa_id en la tabla empresas usando owner_id ─────────────────
   // El storage path usa auth.uid() como primer segmento, no el empresa_id.
+  // Fix multi-empresa: usar .limit(1) + order en vez de .maybeSingle() solo,
+  // porque .maybeSingle() lanza error si el user tiene más de una empresa.
+  // Se toma la empresa más antigua (misma lógica que el fallback de authMiddleware).
   const { data: empresa, error: empresaErr } = await supabase
     .from('empresas')
     .select('id')
     .eq('owner_id', userId)
+    .order('created_at', { ascending: true })
+    .limit(1)
     .maybeSingle();
 
   if (empresaErr) {
