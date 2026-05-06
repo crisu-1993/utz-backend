@@ -1,8 +1,9 @@
 'use strict';
 
-const Anthropic             = require('@anthropic-ai/sdk');
-const { createClient }      = require('@supabase/supabase-js');
-const { buildSystemPrompt } = require('./systemPrompt');
+const Anthropic                        = require('@anthropic-ai/sdk');
+const { createClient }                 = require('@supabase/supabase-js');
+const { buildSystemPrompt }            = require('./systemPrompt');
+const { obtenerContextoFinanciero }    = require('./contextoFinanciero');
 
 const MODEL = 'claude-sonnet-4-6';
 
@@ -43,8 +44,17 @@ async function chatWithNiko(empresa_id, mensaje, user_id) {
   const rolCliente     = data.representante_rol      || 'dueño/a';
   const tratamiento    = data.tratamiento            || 'tu';
 
-  // ── 3. Construir system prompt ────────────────────────────────────────────
-  const systemPrompt = buildSystemPrompt({
+  // ── 3. Obtener contexto financiero ───────────────────────────────────────
+  let contextoFinanciero = null;
+  try {
+    contextoFinanciero = await obtenerContextoFinanciero(empresa_id);
+  } catch (errCtx) {
+    console.error('[niko] Error cargando contexto financiero:', errCtx.message);
+    // Continúa sin contexto financiero — Niko funciona igual, sin datos
+  }
+
+  // ── 4. Construir system prompt base ──────────────────────────────────────
+  const systemPromptBase = buildSystemPrompt({
     nombreCliente,
     rolCliente,
     nombreEmpresa,
@@ -52,13 +62,18 @@ async function chatWithNiko(empresa_id, mensaje, user_id) {
     tratamiento,
   });
 
-  // ── 4. Llamar a Claude ────────────────────────────────────────────────────
+  // ── 5. Formatear contexto financiero e inyectarlo al prompt ──────────────
+  const systemPromptFinal = contextoFinanciero && contextoFinanciero.resumenes_por_mes.length > 0
+    ? systemPromptBase + '\n\n## CONTEXTO FINANCIERO ACTUAL\n\n' + formatearContexto(contextoFinanciero)
+    : systemPromptBase;
+
+  // ── 6. Llamar a Claude ────────────────────────────────────────────────────
   const anthropic = new Anthropic();
 
   const response = await anthropic.messages.create({
     model:      MODEL,
     max_tokens: 1500,
-    system:     systemPrompt,
+    system:     systemPromptFinal,
     messages:   [{ role: 'user', content: mensaje }],
   });
 
@@ -70,6 +85,38 @@ async function chatWithNiko(empresa_id, mensaje, user_id) {
     modelo_usado:  response.model,
     tokens_usados,
   };
+}
+
+// ─── Formatear contexto financiero como texto para el system prompt ──────────
+
+function formatearContexto(contexto) {
+  const { meses_disponibles, ultimo_mes_con_datos, resumenes_por_mes } = contexto;
+
+  const fmt = n => Math.round(n).toLocaleString('es-CL');
+
+  const bloquesMeses = resumenes_por_mes.map(m => {
+    const topLines = m.top_egresos.length > 0
+      ? m.top_egresos.map((e, i) => `    ${i + 1}. ${e.categoria}: $${fmt(e.total)}`).join('\n')
+      : '    (sin egresos categorizados)';
+
+    return `▸ ${m.label}:
+  - Ingresos: $${fmt(m.ingresos)}
+  - Egresos: $${fmt(m.egresos)}
+  - Resultado: $${fmt(m.resultado)}
+  - Margen: ${m.margen_pct}%
+  - Transacciones: ${m.total_transacciones}
+  - Top egresos:
+${topLines}`;
+  });
+
+  return `DATOS FINANCIEROS DISPONIBLES
+
+Meses con datos: ${meses_disponibles.join(', ')}
+Último mes con datos: ${ultimo_mes_con_datos.label}
+
+═════ RESUMEN POR MES ═════
+
+${bloquesMeses.join('\n\n')}`;
 }
 
 module.exports = { chatWithNiko };
