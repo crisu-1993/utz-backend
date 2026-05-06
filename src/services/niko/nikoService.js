@@ -4,7 +4,7 @@ const Anthropic             = require('@anthropic-ai/sdk');
 const { createClient }      = require('@supabase/supabase-js');
 const { buildSystemPrompt } = require('./systemPrompt');
 
-const MODEL = 'claude-sonnet-4-5';
+const MODEL = 'claude-sonnet-4-6';
 
 function getSupabase() {
   return createClient(
