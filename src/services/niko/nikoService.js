@@ -22,7 +22,7 @@ function getSupabase() {
  * @param {string} user_id    - UUID del usuario autenticado (del authMiddleware)
  * @returns {{ respuesta: string, modelo_usado: string, tokens_usados: number }}
  */
-async function chatWithNiko(empresa_id, mensaje, user_id) {
+async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
   const supabase = getSupabase();
 
   // ── 1. Cargar datos de la empresa ─────────────────────────────────────────
@@ -83,7 +83,10 @@ async function chatWithNiko(empresa_id, mensaje, user_id) {
     model:      MODEL,
     max_tokens: 1500,
     system:     systemPromptFinal,
-    messages:   [{ role: 'user', content: mensaje }],
+    messages:   [
+      ...(historial || []),
+      { role: 'user', content: mensaje },
+    ],
   });
 
   const respuesta     = response.content[0].text;
