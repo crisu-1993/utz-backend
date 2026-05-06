@@ -74,7 +74,7 @@ function calcularResumenMes(transacciones, mes, año) {
 
 /**
  * Obtiene el contexto financiero completo de una empresa.
- * Hace UNA sola query a Supabase y procesa todo en memoria.
+ * Hace queries en paralelo a transacciones_historicas y eerr_manual.
  *
  * @param {string} empresa_id
  * @returns {Promise<object>}
@@ -82,21 +82,55 @@ function calcularResumenMes(transacciones, mes, año) {
 async function obtenerContextoFinanciero(empresa_id) {
   const supabase = getSupabase();
 
-  const { data: transacciones, error } = await supabase
-    .from('transacciones_historicas')
-    .select('fecha_transaccion, tipo, monto_original, categoria_sugerida_ia')
-    .eq('empresa_id', empresa_id)
-    .order('fecha_transaccion', { ascending: true });
+  // ── Queries en paralelo ───────────────────────────────────────────────────
+  const [txResult, manualResult] = await Promise.all([
+    supabase
+      .from('transacciones_historicas')
+      .select('fecha_transaccion, tipo, monto_original, categoria_sugerida_ia')
+      .eq('empresa_id', empresa_id)
+      .order('fecha_transaccion', { ascending: true }),
+    supabase
+      .from('eerr_manual')
+      .select('anio, mes, ingresos, egresos')
+      .eq('empresa_id', empresa_id)
+      .order('anio', { ascending: true })
+      .order('mes', { ascending: true, nullsFirst: true }),
+  ]);
 
-  if (error) {
-    throw new Error(`[contextoFinanciero] Error consultando transacciones: ${error.message}`);
+  if (txResult.error) {
+    throw new Error(`[contextoFinanciero] Error consultando transacciones: ${txResult.error.message}`);
+  }
+  if (manualResult.error) {
+    console.warn('[contextoFinanciero] Error consultando eerr_manual:', manualResult.error.message);
   }
 
-  if (!transacciones || transacciones.length === 0) {
+  const transacciones = txResult.data   || [];
+  const manualesRaw   = manualResult.data || [];
+
+  // ── Construir datos_manuales ──────────────────────────────────────────────
+  const datos_manuales = manualesRaw.map(r => {
+    const ingresos  = Math.round(Number(r.ingresos) || 0);
+    const egresos   = Math.round(Number(r.egresos)  || 0);
+    const resultado = ingresos - egresos;
+    const periodo   = r.mes
+      ? `${NOMBRES_MES[r.mes]} ${r.anio}`
+      : `${r.anio} (anual)`;
+    return {
+      periodo,
+      anio:     r.anio,
+      mes:      r.mes ?? null,
+      ingresos,
+      egresos,
+      resultado,
+    };
+  });
+
+  if (transacciones.length === 0) {
     return {
       meses_disponibles:    [],
       ultimo_mes_con_datos: null,
       resumenes_por_mes:    [],
+      datos_manuales,
     };
   }
 
@@ -136,6 +170,7 @@ async function obtenerContextoFinanciero(empresa_id) {
     meses_disponibles,
     ultimo_mes_con_datos,
     resumenes_por_mes,
+    datos_manuales,
   };
 }
 

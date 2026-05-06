@@ -68,7 +68,11 @@ async function chatWithNiko(empresa_id, mensaje, user_id) {
   });
 
   // ── 5. Formatear contexto financiero e inyectarlo al prompt ──────────────
-  const systemPromptFinal = contextoFinanciero && contextoFinanciero.resumenes_por_mes.length > 0
+  const tieneContexto = contextoFinanciero && (
+    contextoFinanciero.resumenes_por_mes.length > 0 ||
+    (contextoFinanciero.datos_manuales && contextoFinanciero.datos_manuales.length > 0)
+  );
+  const systemPromptFinal = tieneContexto
     ? systemPromptBase + '\n\n## CONTEXTO FINANCIERO ACTUAL\n\n' + formatearContexto(contextoFinanciero)
     : systemPromptBase;
 
@@ -95,7 +99,7 @@ async function chatWithNiko(empresa_id, mensaje, user_id) {
 // ─── Formatear contexto financiero como texto para el system prompt ──────────
 
 function formatearContexto(contexto) {
-  const { meses_disponibles, ultimo_mes_con_datos, resumenes_por_mes } = contexto;
+  const { meses_disponibles, ultimo_mes_con_datos, resumenes_por_mes, datos_manuales } = contexto;
 
   const fmt = n => Math.round(n).toLocaleString('es-CL');
 
@@ -114,14 +118,21 @@ function formatearContexto(contexto) {
 ${topLines}`;
   });
 
-  return `DATOS FINANCIEROS DISPONIBLES
+  // ── Sección datos históricos manuales ─────────────────────────────────────
+  let bloqueManual = '';
+  if (datos_manuales && datos_manuales.length > 0) {
+    const lineas = datos_manuales.map(d => `▸ ${d.periodo}:
+  - Ingresos: $${fmt(d.ingresos)}
+  - Egresos: $${fmt(d.egresos)}
+  - Resultado: $${fmt(d.resultado)}`);
+    bloqueManual = `\n\n═════ DATOS HISTÓRICOS Y MANUALES ═════\n\n${lineas.join('\n\n')}`;
+  }
 
-Meses con datos: ${meses_disponibles.join(', ')}
-Último mes con datos: ${ultimo_mes_con_datos.label}
+  const encabezado = meses_disponibles.length > 0
+    ? `Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos.label}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`
+    : '(Sin datos bancarios disponibles)';
 
-═════ RESUMEN POR MES ═════
-
-${bloquesMeses.join('\n\n')}`;
+  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}`;
 }
 
 module.exports = { chatWithNiko };
