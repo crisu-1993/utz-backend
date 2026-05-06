@@ -30,11 +30,16 @@ async function chatWithNiko(empresa_id, mensaje, user_id) {
     .from('empresas')
     .select('nombre, giro, representante_nombre, representante_rol, tratamiento')
     .eq('id', empresa_id)
-    .single();
+    .maybeSingle();
 
   if (error) {
-    console.error(`[niko] Error cargando empresa ${empresa_id}:`, error.message);
+    console.error(`[niko] Error query empresa ${empresa_id}:`, error.message);
     throw new Error('No se pudieron cargar los datos de la empresa');
+  }
+
+  if (!data) {
+    console.error(`[niko] Empresa no encontrada: ${empresa_id}`);
+    throw new Error('Empresa no encontrada');
   }
 
   // ── 2. Mapear datos con fallbacks seguros ─────────────────────────────────
