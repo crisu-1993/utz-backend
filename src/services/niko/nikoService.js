@@ -7,11 +7,103 @@ const { obtenerContextoFinanciero }    = require('./contextoFinanciero');
 
 const MODEL = 'claude-sonnet-4-6';
 
+// ─── Tool spec para Claude API ────────────────────────────────────────────────
+//
+// Niko dispone de esta tool para guardar reglas de categorización cuando el
+// usuario confirma explícitamente cómo clasificar un patrón de transacciones.
+
+const NIKO_TOOLS = [
+  {
+    name: 'guardar_regla_categorizacion',
+    description: "Guarda una regla permanente que asocia un patrón de texto con una categoría del EERR. Llama esta tool ÚNICAMENTE cuando el usuario confirmó de forma explícita y clara (ejemplos de confirmación válida: 'sí', 'dale', 'listo', 'hagámoslo', 'perfecto', 'ya', 'ok', 'bueno', 'sí po'). NUNCA la llames si el usuario dudó, preguntó algo más, cambió de tema, o no respondió con claridad afirmativa. Si hay duda, primero aclara y espera confirmación.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        patron: {
+          type: 'string',
+          description: "Texto del patrón en minúsculas, exactamente como aparece en descripcion_normalizada de las transacciones. Ejemplos: 'redcompra', '18720058-k', 'don manuel', 'copec'. NO incluyas espacios extra ni caracteres extraños.",
+        },
+        categoria_nombre: {
+          type: 'string',
+          enum: [
+            'Ventas',
+            'Otros ingresos',
+            'Costo Directo',
+            'Sueldos y honorarios',
+            'Servicios básicos',
+            'Arriendo',
+            'Marketing',
+            'Operacional',
+            'Impuestos',
+            'Inversión',
+            'Financieros',
+            'Otros',
+          ],
+          description: 'Nombre exacto de la categoría del catálogo de la empresa. Debe ser uno de los valores del enum. Si el usuario propone un nombre que no existe en el catálogo, mapéalo al más cercano y confírmalo antes de llamar la tool.',
+        },
+        tipo_patron: {
+          type: 'string',
+          enum: ['contiene', 'empieza_con', 'exacto'],
+          description: "Tipo de coincidencia al buscar el patrón. 'contiene' (recomendado): aparece en cualquier parte. 'empieza_con': prefijo. 'exacto': descripción idéntica. Si no estás seguro, usa 'contiene'.",
+        },
+        descripcion_aprendida: {
+          type: 'string',
+          description: "Contexto que el usuario te dio al confirmar la regla, en sus propias palabras. Ej: 'le compro harina a Don Manuel', 'es el arriendo del local'. Esto te ayuda a recordar de qué se trata el patrón. Si el usuario no dio contexto explícito, déjalo vacío.",
+        },
+      },
+      required: ['patron', 'categoria_nombre', 'tipo_patron'],
+    },
+  },
+];
+
 function getSupabase() {
   return createClient(
     process.env.SUPABASE_URL,
     process.env.SUPABASE_SERVICE_KEY
   );
+}
+
+// ─── ejecutarTool ─────────────────────────────────────────────────────────────
+//
+// Ejecuta una tool que Niko pidió usar.
+// Por ahora MOCK: solo loguea y devuelve éxito simulado.
+// La conexión real al endpoint de crear regla se implementa en 2B.7.
+//
+// @param {object} toolUseBlock - bloque type:'tool_use' de la respuesta de Claude
+// @param {string} empresa_id   - empresa que ejecuta la tool
+// @param {string} user_id      - usuario que ejecuta la tool
+// @returns {object} { ok, mensaje, datos? }
+
+async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
+  const { name, input, id: tool_use_id } = toolUseBlock;
+
+  console.log('[ejecutarTool] Niko pidió usar tool:', {
+    tool_use_id,
+    name,
+    empresa_id,
+    user_id,
+    input,
+  });
+
+  if (name === 'guardar_regla_categorizacion') {
+    return {
+      ok:     true,
+      mensaje: `[MOCK] Regla guardada: patrón "${input.patron}" → categoría "${input.categoria_nombre}"`,
+      datos: {
+        patron:                input.patron,
+        categoria_nombre:      input.categoria_nombre,
+        tipo_patron:           input.tipo_patron || 'contiene',
+        descripcion_aprendida: input.descripcion_aprendida || null,
+        mock:                  true,
+      },
+    };
+  }
+
+  console.error('[ejecutarTool] Tool desconocida:', name);
+  return {
+    ok:      false,
+    mensaje: `Tool '${name}' no implementada`,
+  };
 }
 
 /**
