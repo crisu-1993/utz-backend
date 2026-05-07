@@ -168,33 +168,74 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
     ? systemPromptBase + '\n\n## CONTEXTO FINANCIERO ACTUAL\n\n' + formatearContexto(contextoFinanciero)
     : systemPromptBase;
 
-  // ── 6. Llamar a Claude ────────────────────────────────────────────────────
+  // ── 6. Llamar a Claude (primera ronda, con tools) ────────────────────────
   const anthropic = new Anthropic();
 
-  const response = await anthropic.messages.create({
+  let response = await anthropic.messages.create({
     model:      MODEL,
     max_tokens: 2000,
     system:     systemPromptFinal,
+    tools:      NIKO_TOOLS,
     messages:   [
       ...(historial || []),
       { role: 'user', content: mensaje },
     ],
   });
 
-  const textBlock     = response.content.find(b => b.type === 'text');
-  const respuesta     = textBlock?.text ?? '';
-  const tokens_usados = response.usage.input_tokens + response.usage.output_tokens;
+  let totalInputTokens  = response.usage?.input_tokens  || 0;
+  let totalOutputTokens = response.usage?.output_tokens || 0;
+
+  // ── 7. Tool calling: segunda ronda si Claude pidió usar una tool ──────────
+  if (response.stop_reason === 'tool_use') {
+    const toolUseBlock = response.content.find(b => b.type === 'tool_use');
+
+    if (toolUseBlock) {
+      console.log('[chatWithNiko] Claude pidió tool:', toolUseBlock.name);
+
+      const toolResult = await ejecutarTool(toolUseBlock, empresa_id, user_id);
+
+      // Segunda ronda SIN tools para evitar loops
+      response = await anthropic.messages.create({
+        model:      MODEL,
+        max_tokens: 2000,
+        system:     systemPromptFinal,
+        messages:   [
+          ...(historial || []),
+          { role: 'user',      content: mensaje },
+          { role: 'assistant', content: response.content },
+          {
+            role:    'user',
+            content: [
+              {
+                type:        'tool_result',
+                tool_use_id: toolUseBlock.id,
+                content:     toolResult.ok
+                  ? toolResult.mensaje
+                  : `Error: ${toolResult.mensaje}`,
+              },
+            ],
+          },
+        ],
+      });
+
+      totalInputTokens  += response.usage?.input_tokens  || 0;
+      totalOutputTokens += response.usage?.output_tokens || 0;
+    }
+  }
+
+  const textBlock = response.content.find(b => b.type === 'text');
+  const respuesta = textBlock?.text ?? '';
 
   if (!respuesta || respuesta.trim().length === 0) {
     console.warn('[nikoService] Respuesta vacía de Claude, usando fallback');
     return {
       respuesta:     'Disculpa, hubo un problema. ¿Puedes repetir tu pregunta?',
       modelo_usado:  MODEL,
-      tokens_usados: response.usage
-        ? response.usage.input_tokens + response.usage.output_tokens
-        : 0,
+      tokens_usados: totalInputTokens + totalOutputTokens,
     };
   }
+
+  const tokens_usados = totalInputTokens + totalOutputTokens;
 
   return {
     respuesta,
