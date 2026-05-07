@@ -81,7 +81,7 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
 
   const response = await anthropic.messages.create({
     model:      MODEL,
-    max_tokens: 1500,
+    max_tokens: 2000,
     system:     systemPromptFinal,
     messages:   [
       ...(historial || []),
@@ -89,8 +89,20 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
     ],
   });
 
-  const respuesta     = response.content[0].text;
+  const textBlock     = response.content.find(b => b.type === 'text');
+  const respuesta     = textBlock?.text ?? '';
   const tokens_usados = response.usage.input_tokens + response.usage.output_tokens;
+
+  if (!respuesta || respuesta.trim().length === 0) {
+    console.warn('[nikoService] Respuesta vacía de Claude, usando fallback');
+    return {
+      respuesta:     'Disculpa, hubo un problema. ¿Puedes repetir tu pregunta?',
+      modelo_usado:  MODEL,
+      tokens_usados: response.usage
+        ? response.usage.input_tokens + response.usage.output_tokens
+        : 0,
+    };
+  }
 
   return {
     respuesta,
