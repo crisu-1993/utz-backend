@@ -91,6 +91,93 @@ function calcularScore({ veces, montoPatron, montoTotalEmpresa, mesesDistintos }
   return Math.round(puntajeFreq + puntajeMonto + puntajeTemporal);
 }
 
+// ─── detectarPatrones ─────────────────────────────────────────────────────────
+//
+// Función pura: recibe un array de transacciones ya cargadas y devuelve los
+// patrones detectados, ordenados por score DESC.
+//
+// Exportada para ser reutilizada por contextoFinanciero.js (Niko).
+//
+// @param {Array}  transacciones  - filas con campos:
+//                                  id, descripcion_normalizada,
+//                                  monto_original, tipo, fecha_transaccion
+// @param {object} opts
+// @param {number} opts.limit     - máximo resultados (default: sin límite)
+// @param {number} opts.umbral    - ocurrencias mínimas (default: UMBRAL_MINIMO)
+// @param {number} opts.scoreMin  - score mínimo para incluir (default: 0)
+// @returns {Array}
+
+function detectarPatrones(transacciones, { limit = Infinity, umbral = UMBRAL_MINIMO, scoreMin = 0 } = {}) {
+  if (!transacciones || transacciones.length === 0) return [];
+
+  const montoTotalEmpresa = transacciones.reduce(
+    (acc, tx) => acc + Math.abs(tx.monto_original || 0),
+    0
+  );
+
+  const mapa = {};
+
+  for (const tx of transacciones) {
+    const patron = extraerPatronClave(tx.descripcion_normalizada);
+    if (!patron) continue;
+
+    if (!mapa[patron]) {
+      mapa[patron] = {
+        patron,
+        veces:             0,
+        monto_total:       0,
+        cantidad_ingresos: 0,
+        cantidad_egresos:  0,
+        meses:             new Set(),
+        ejemplos:          [],
+        ids:               [],
+      };
+    }
+
+    const acum = mapa[patron];
+    acum.veces       += 1;
+    acum.monto_total += Math.abs(tx.monto_original || 0);
+
+    if (tx.tipo === 'ingreso') acum.cantidad_ingresos += 1;
+    else                       acum.cantidad_egresos  += 1;
+
+    acum.meses.add((tx.fecha_transaccion || '').slice(0, 7));
+    if (acum.ejemplos.length < 3) acum.ejemplos.push(tx.descripcion_normalizada);
+    acum.ids.push(tx.id);
+  }
+
+  return Object.values(mapa)
+    .filter(p => p.veces >= umbral)
+    .map(p => {
+      const score = calcularScore({
+        veces:            p.veces,
+        montoPatron:      p.monto_total,
+        montoTotalEmpresa,
+        mesesDistintos:   p.meses.size,
+      });
+
+      const tipo_predominante = p.cantidad_ingresos >= p.cantidad_egresos
+        ? 'ingreso'
+        : 'egreso';
+
+      return {
+        patron:               p.patron,
+        veces_aparece:        p.veces,
+        monto_total:          Math.round(p.monto_total),
+        tipo_predominante,
+        cantidad_ingresos:    p.cantidad_ingresos,
+        cantidad_egresos:     p.cantidad_egresos,
+        es_mixto:             p.cantidad_ingresos > 0 && p.cantidad_egresos > 0,
+        score,
+        ejemplos_descripcion: p.ejemplos,
+        transacciones_ids:    p.ids,
+      };
+    })
+    .filter(p => p.score >= scoreMin)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
 // ─── GET /detectar-patrones/:empresa_id ──────────────────────────────────────
 //
 // Query params:
@@ -101,21 +188,7 @@ function calcularScore({ veces, montoPatron, montoTotalEmpresa, mesesDistintos }
 //     ok: true,
 //     empresa_id: "...",
 //     total_sin_categorizar: 221,
-//     patrones_detectados: [
-//       {
-//         patron:               "redcompra",
-//         veces_aparece:        47,
-//         monto_total:          2500000,
-//         tipo_predominante:    "egreso",
-//         cantidad_ingresos:    0,
-//         cantidad_egresos:     47,
-//         es_mixto:             false,
-//         score:                85,
-//         ejemplos_descripcion: ["redcompra mall plaza trebol", ...],
-//         transacciones_ids:    ["uuid1", ...]
-//       },
-//       ...
-//     ]
+//     patrones_detectados: [...],
 //   }
 
 router.get('/detectar-patrones/:empresa_id', authMiddleware, async (req, res) => {
@@ -171,76 +244,8 @@ router.get('/detectar-patrones/:empresa_id', authMiddleware, async (req, res) =>
       });
     }
 
-    // ── 3. Calcular monto total (denominador del score de monto) ──────────
-    const montoTotalEmpresa = transacciones.reduce(
-      (acc, tx) => acc + Math.abs(tx.monto_original || 0),
-      0
-    );
-
-    // ── 4. Agrupar transacciones por patrón clave ─────────────────────────
-    const mapa = {};
-
-    for (const tx of transacciones) {
-      const patron = extraerPatronClave(tx.descripcion_normalizada);
-      if (!patron) continue;
-
-      if (!mapa[patron]) {
-        mapa[patron] = {
-          patron,
-          veces:             0,
-          monto_total:       0,
-          cantidad_ingresos: 0,
-          cantidad_egresos:  0,
-          meses:             new Set(),
-          ejemplos:          [],
-          ids:               [],
-        };
-      }
-
-      const acum = mapa[patron];
-      acum.veces       += 1;
-      acum.monto_total += Math.abs(tx.monto_original || 0);
-
-      if (tx.tipo === 'ingreso') acum.cantidad_ingresos += 1;
-      else                       acum.cantidad_egresos  += 1;
-
-      // "YYYY-MM" para detectar recurrencia en distintos meses
-      acum.meses.add((tx.fecha_transaccion || '').slice(0, 7));
-
-      if (acum.ejemplos.length < 3) acum.ejemplos.push(tx.descripcion_normalizada);
-      acum.ids.push(tx.id);
-    }
-
-    // ── 5. Filtrar por umbral, calcular score, ordenar y aplicar limit ────
-    const patrones = Object.values(mapa)
-      .filter(p => p.veces >= UMBRAL_MINIMO)
-      .map(p => {
-        const score = calcularScore({
-          veces:            p.veces,
-          montoPatron:      p.monto_total,
-          montoTotalEmpresa,
-          mesesDistintos:   p.meses.size,
-        });
-
-        const tipo_predominante = p.cantidad_ingresos >= p.cantidad_egresos
-          ? 'ingreso'
-          : 'egreso';
-
-        return {
-          patron:               p.patron,
-          veces_aparece:        p.veces,
-          monto_total:          Math.round(p.monto_total),
-          tipo_predominante,
-          cantidad_ingresos:    p.cantidad_ingresos,
-          cantidad_egresos:     p.cantidad_egresos,
-          es_mixto:             p.cantidad_ingresos > 0 && p.cantidad_egresos > 0,
-          score,
-          ejemplos_descripcion: p.ejemplos,
-          transacciones_ids:    p.ids,
-        };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
+    // ── 3. Detectar patrones (delega en función pura) ─────────────────────
+    const patrones = detectarPatrones(transacciones, { limit });
 
     return res.json({
       ok:                    true,
@@ -255,4 +260,7 @@ router.get('/detectar-patrones/:empresa_id', authMiddleware, async (req, res) =>
   }
 });
 
-module.exports = router;
+module.exports                        = router;
+module.exports.detectarPatrones       = detectarPatrones;
+module.exports.extraerPatronClave     = extraerPatronClave;
+module.exports.calcularScore          = calcularScore;
