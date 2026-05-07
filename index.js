@@ -32,6 +32,7 @@ app.use('/api/fintoc',            require('./src/routes/fintoc'));
 app.use('/api/empresas',          require('./src/routes/empresas'));
 app.use('/api/niko',              require('./src/routes/niko'));
 app.use('/api/recordatorios',     require('./src/routes/recordatorios'));
+app.use('/api/categorias',        require('./src/routes/categorias'));
 
 app.listen(PORT, () => {
   console.log(`UTZ Backend escuchando en http://localhost:${PORT}`);
