@@ -161,8 +161,10 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
 
   // ── 5. Formatear contexto financiero e inyectarlo al prompt ──────────────
   const tieneContexto = contextoFinanciero && (
-    contextoFinanciero.resumenes_por_mes.length > 0 ||
-    (contextoFinanciero.datos_manuales && contextoFinanciero.datos_manuales.length > 0)
+    contextoFinanciero.resumenes_por_mes?.length > 0        ||
+    contextoFinanciero.datos_manuales?.length > 0           ||
+    contextoFinanciero.patrones_pendientes?.length > 0      ||
+    contextoFinanciero.reglas_activas?.length > 0
   );
   const systemPromptFinal = tieneContexto
     ? systemPromptBase + '\n\n## CONTEXTO FINANCIERO ACTUAL\n\n' + formatearContexto(contextoFinanciero)
@@ -247,7 +249,14 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
 // ─── Formatear contexto financiero como texto para el system prompt ──────────
 
 function formatearContexto(contexto) {
-  const { meses_disponibles, ultimo_mes_con_datos, resumenes_por_mes, datos_manuales } = contexto;
+  const {
+    meses_disponibles,
+    ultimo_mes_con_datos,
+    resumenes_por_mes,
+    datos_manuales,
+    patrones_pendientes,
+    reglas_activas,
+  } = contexto;
 
   const fmt = n => Math.round(n).toLocaleString('es-CL');
 
@@ -276,11 +285,54 @@ ${topLines}`;
     bloqueManual = `\n\n═════ DATOS HISTÓRICOS Y MANUALES ═════\n\n${lineas.join('\n\n')}`;
   }
 
+  // ── Bloque A: Patrones pendientes (score >= 70) ───────────────────────────
+  let bloquePatrones = '';
+  const patronesFiltrados = (patrones_pendientes || []).filter(p => p.score >= 70);
+
+  if (patronesFiltrados.length > 0) {
+    const lineasPatrones = patronesFiltrados.map((p, i) => {
+      const tipo = p.es_mixto
+        ? 'FLUJO MIXTO (entrada y salida) — preguntar diferente'
+        : p.tipo_predominante === 'ingreso'
+          ? 'ingresos'
+          : 'egresos';
+
+      const ejemplos = (p.ejemplos_descripcion || []).slice(0, 2).join(', ');
+
+      return `${i + 1}. "${p.patron}" — score ${p.score}
+   - ${p.veces_aparece} transacciones | $${fmt(p.monto_total)} acumulado
+   - Tipo: ${tipo}
+   - Ejemplos: ${ejemplos}`;
+    });
+
+    bloquePatrones = `\n\n═════ PATRONES PENDIENTES DE CATEGORIZAR ═════\n\n` +
+      `Hay ${patronesFiltrados.length} patrones con alta confianza (score 70+) sin categoría asignada.\n` +
+      `Están ordenados por relevancia (score 0-100).\n\n` +
+      `⚠️  Usa esta información para preguntar al cliente de forma natural cuando sea el momento. ` +
+      `No preguntes por todos en un mismo mensaje. Máximo 1-2 patrones por turno.\n\n` +
+      lineasPatrones.join('\n\n');
+  }
+
+  // ── Bloque B: Reglas ya aprendidas (siempre visible) ─────────────────────
+  let bloqueReglas = '\n\n═════ REGLAS YA APRENDIDAS ═════\n\n';
+
+  if ((reglas_activas || []).length > 0) {
+    const lineasReglas = reglas_activas.map(r => {
+      const contextoAprendido = r.descripcion_aprendida
+        ? ` — "${r.descripcion_aprendida}"`
+        : '';
+      return `- "${r.patron}" → ${r.categoria_nombre} (${r.tipo_patron})${contextoAprendido}`;
+    });
+    bloqueReglas += lineasReglas.join('\n');
+  } else {
+    bloqueReglas += '(sin reglas guardadas todavía)';
+  }
+
   const encabezado = meses_disponibles.length > 0
     ? `Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos.label}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`
     : '(Sin datos bancarios disponibles)';
 
-  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}`;
+  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}`;
 }
 
 module.exports = { chatWithNiko };
