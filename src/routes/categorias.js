@@ -260,7 +260,243 @@ router.get('/detectar-patrones/:empresa_id', authMiddleware, async (req, res) =>
   }
 });
 
+// ─── crearRegla ───────────────────────────────────────────────────────────────
+//
+// Función pura: crea o actualiza una regla de categorización y aplica el patrón
+// a todas las transacciones históricas existentes sin categorizar.
+//
+// @param {object} supabase  - cliente Supabase ya instanciado
+// @param {object} params
+//   @param {string}  empresa_id            - uuid requerido
+//   @param {string}  patron                - texto requerido
+//   @param {string}  categoria_nombre      - nombre del catálogo requerido
+//   @param {string}  tipo_patron           - 'contiene'|'empieza_con'|'exacto'
+//   @param {string}  creada_por            - 'usuario'|'niko' (hardcodeado por caller)
+//   @param {string}  [descripcion_aprendida] - contexto opcional
+//   @param {boolean} [dry_run=false]       - si true, solo cuenta sin insertar
+//
+// @returns {object} { ok, regla_id, transacciones_afectadas, dry_run, accion, mensaje }
+//                   o { ok: false, error, codigo }
+
+const TIPOS_PATRON_VALIDOS = ['contiene', 'empieza_con', 'exacto'];
+
+function buildWherePatron(patron, tipo_patron) {
+  // Escapar caracteres especiales de LIKE: % y _
+  const escapado = patron
+    .replace(/\\/g, '\\\\')
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_');
+
+  if (tipo_patron === 'contiene')     return `%${escapado}%`;
+  if (tipo_patron === 'empieza_con')  return `${escapado}%`;
+  return escapado;  // 'exacto'
+}
+
+async function crearRegla(supabase, params) {
+  const {
+    empresa_id,
+    patron,
+    categoria_nombre,
+    tipo_patron,
+    creada_por,
+    descripcion_aprendida = null,
+    dry_run               = false,
+  } = params;
+
+  // ── 1. Validar inputs ────────────────────────────────────────────────────
+  if (!empresa_id)       return { ok: false, codigo: 'VALIDACION', error: 'empresa_id es requerido' };
+  if (!patron?.trim())   return { ok: false, codigo: 'VALIDACION', error: 'patron es requerido' };
+  if (!categoria_nombre) return { ok: false, codigo: 'VALIDACION', error: 'categoria_nombre es requerido' };
+  if (!TIPOS_PATRON_VALIDOS.includes(tipo_patron)) {
+    return { ok: false, codigo: 'VALIDACION', error: `tipo_patron inválido: '${tipo_patron}'` };
+  }
+  if (!['usuario', 'niko'].includes(creada_por)) {
+    return { ok: false, codigo: 'VALIDACION', error: `creada_por inválido: '${creada_por}'` };
+  }
+
+  // ── 2. Construir WHERE para ILIKE ─────────────────────────────────────────
+  const whereValue = buildWherePatron(patron.trim().toLowerCase(), tipo_patron);
+
+  // ── 3. Resolver categoria_nombre → categoria_id ───────────────────────────
+  const { data: catData, error: catErr } = await supabase
+    .from('categorias_eerr')
+    .select('id')
+    .eq('empresa_id', empresa_id)
+    .eq('nombre', categoria_nombre)
+    .eq('activa', true)
+    .maybeSingle();
+
+  if (catErr) {
+    console.error('[crearRegla] Error buscando categoría:', catErr.message);
+    return { ok: false, codigo: 'DB_ERROR', error: 'Error al buscar la categoría' };
+  }
+  if (!catData) {
+    return {
+      ok:     false,
+      codigo: 'CATEGORIA_NO_EXISTE',
+      error:  `La categoría '${categoria_nombre}' no existe o no está activa para esta empresa`,
+    };
+  }
+  const categoria_id = catData.id;
+
+  // ── 4. Contar transacciones afectadas (usado en dry_run y en respuesta) ───
+  const { data: txCount, error: countErr } = await supabase
+    .from('transacciones_historicas')
+    .select('id')
+    .eq('empresa_id', empresa_id)
+    .is('categoria_id', null)
+    .ilike('descripcion_normalizada', whereValue);
+
+  const transacciones_afectadas = countErr ? 0 : (txCount?.length ?? 0);
+
+  // ── 5. DRY RUN ────────────────────────────────────────────────────────────
+  if (dry_run) {
+    return {
+      ok:                      true,
+      dry_run:                 true,
+      accion:                  'simulada',
+      regla_id:                null,
+      transacciones_afectadas,
+      mensaje: `Simulación: la regla afectaría a ${transacciones_afectadas} transacciones`,
+    };
+  }
+
+  // ── 6a. Determinar si la regla ya existe (para saber accion) ─────────────
+  const { data: existente } = await supabase
+    .from('reglas_categorizacion')
+    .select('id')
+    .eq('empresa_id', empresa_id)
+    .eq('patron', patron.trim().toLowerCase())
+    .eq('tipo_patron', tipo_patron)
+    .maybeSingle();
+
+  const accion = existente ? 'actualizada' : 'creada';
+
+  // ── 6b. UPSERT en reglas_categorizacion ──────────────────────────────────
+  const { data: upsertData, error: upsertErr } = await supabase
+    .from('reglas_categorizacion')
+    .upsert(
+      {
+        empresa_id,
+        categoria_id,
+        patron:                patron.trim().toLowerCase(),
+        tipo_patron,
+        descripcion_aprendida: descripcion_aprendida || null,
+        creada_por,
+        activa:                true,
+      },
+      { onConflict: 'empresa_id,patron,tipo_patron' }
+    )
+    .select('id')
+    .single();
+
+  if (upsertErr) {
+    console.error('[crearRegla] Error en upsert:', upsertErr.message);
+    return { ok: false, codigo: 'INSERT_FALLO', error: upsertErr.message };
+  }
+
+  const regla_id = upsertData.id;
+
+  // ── 6c. UPDATE transacciones existentes ───────────────────────────────────
+  let warning;
+  let txAfectadas = transacciones_afectadas;  // valor del count previo
+
+  const { data: txUpdated, error: updateErr } = await supabase
+    .from('transacciones_historicas')
+    .update({ categoria_id })
+    .eq('empresa_id', empresa_id)
+    .is('categoria_id', null)
+    .ilike('descripcion_normalizada', whereValue)
+    .select('id');
+
+  if (updateErr) {
+    console.error('[crearRegla] Error actualizando transacciones:', updateErr.message);
+    warning     = `Regla guardada pero UPDATE de transacciones falló: ${updateErr.message}`;
+    txAfectadas = 0;
+  } else {
+    txAfectadas = txUpdated?.length ?? 0;
+  }
+
+  // ── 7. Retornar ───────────────────────────────────────────────────────────
+  const resultado = {
+    ok:                      true,
+    dry_run:                 false,
+    accion,
+    regla_id,
+    transacciones_afectadas: txAfectadas,
+    mensaje: `Regla ${accion}: ${txAfectadas} transacciones categorizadas como '${categoria_nombre}'`,
+  };
+  if (warning) resultado.warning = warning;
+
+  return resultado;
+}
+
+// ─── POST /crear-regla ────────────────────────────────────────────────────────
+//
+// Body: { empresa_id, patron, categoria_nombre, tipo_patron,
+//         descripcion_aprendida?, dry_run? }
+// Auth: el usuario debe ser owner de la empresa.
+// creada_por siempre 'usuario' — nunca aceptado del body.
+
+router.post('/crear-regla', authMiddleware, async (req, res) => {
+  const { user_id } = req.auth;
+  const {
+    empresa_id,
+    patron,
+    categoria_nombre,
+    tipo_patron,
+    descripcion_aprendida,
+    dry_run = false,
+  } = req.body;
+
+  const supabase = getSupabase();
+
+  try {
+    // ── 1. Validar ownership de empresa ───────────────────────────────────
+    const { data: empresa, error: empresaErr } = await supabase
+      .from('empresas')
+      .select('id')
+      .eq('id', empresa_id)
+      .eq('owner_id', user_id)
+      .maybeSingle();
+
+    if (empresaErr) {
+      console.error('[crear-regla] Error validando empresa:', empresaErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al validar empresa' });
+    }
+    if (!empresa) {
+      return res.status(403).json({ ok: false, error: 'Sin permisos sobre esa empresa' });
+    }
+
+    // ── 2. Llamar función pura ─────────────────────────────────────────────
+    const resultado = await crearRegla(supabase, {
+      empresa_id,
+      patron,
+      categoria_nombre,
+      tipo_patron,
+      descripcion_aprendida,
+      dry_run,
+      creada_por: 'usuario',   // hardcodeado — nunca del body
+    });
+
+    // ── 3. Mapear código de error a HTTP status ────────────────────────────
+    if (!resultado.ok) {
+      const status = resultado.codigo === 'CATEGORIA_NO_EXISTE' || resultado.codigo === 'VALIDACION'
+        ? 400
+        : 500;
+      return res.status(status).json(resultado);
+    }
+
+    return res.json(resultado);
+
+  } catch (err) {
+    console.error('[crear-regla] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
 module.exports                        = router;
 module.exports.detectarPatrones       = detectarPatrones;
 module.exports.extraerPatronClave     = extraerPatronClave;
 module.exports.calcularScore          = calcularScore;
+module.exports.crearRegla             = crearRegla;
