@@ -84,7 +84,7 @@ async function obtenerContextoFinanciero(empresa_id) {
   const supabase = getSupabase();
 
   // ── Queries en paralelo ───────────────────────────────────────────────────
-  const [txResult, manualResult, txPatronesResult, reglasResult] = await Promise.all([
+  const [txResult, manualResult, txPatronesResult, reglasResult, empresaResult] = await Promise.all([
     // Todas las tx para resúmenes mensuales (existente)
     supabase
       .from('transacciones_historicas')
@@ -115,6 +115,13 @@ async function obtenerContextoFinanciero(empresa_id) {
       .eq('empresa_id', empresa_id)
       .eq('activa', true)
       .order('created_at', { ascending: false }),
+
+    // Flag primera sesión de Niko (2B.11)
+    supabase
+      .from('empresas')
+      .select('primera_conversacion_niko_completada')
+      .eq('id', empresa_id)
+      .single(),
   ]);
 
   // ── Manejo de errores diferenciado ────────────────────────────────────────
@@ -132,9 +139,19 @@ async function obtenerContextoFinanciero(empresa_id) {
   if (reglasResult.error) {
     console.warn('[contextoFinanciero] Error consultando reglas_categorizacion:', reglasResult.error.message);
   }
+  if (empresaResult.error) {
+    console.warn('[contextoFinanciero] Error consultando empresas (primera sesión):', empresaResult.error.message);
+  }
 
   const transacciones = txResult.data   || [];
   const manualesRaw   = manualResult.data || [];
+
+  // ── Determinar si es primera sesión con Niko ─────────────────────────────
+  // es_primera_sesion = true  → Niko usa presentación formal
+  // es_primera_sesion = false → Niko usa saludo casual
+  const es_primera_sesion = empresaResult.data
+    ? !empresaResult.data.primera_conversacion_niko_completada
+    : false;  // safe default: tratar como recurrente si no se pudo leer
 
   // ── Construir patrones_pendientes ─────────────────────────────────────────
   const txPatrones = txPatronesResult.data || [];
@@ -175,6 +192,7 @@ async function obtenerContextoFinanciero(empresa_id) {
       datos_manuales,
       patrones_pendientes,
       reglas_activas,
+      es_primera_sesion,
     };
   }
 
@@ -217,6 +235,7 @@ async function obtenerContextoFinanciero(empresa_id) {
     datos_manuales,
     patrones_pendientes,
     reglas_activas,
+    es_primera_sesion,
   };
 }
 

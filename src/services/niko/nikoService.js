@@ -185,7 +185,8 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
     contextoFinanciero.resumenes_por_mes?.length > 0        ||
     contextoFinanciero.datos_manuales?.length > 0           ||
     contextoFinanciero.patrones_pendientes?.length > 0      ||
-    contextoFinanciero.reglas_activas?.length > 0
+    contextoFinanciero.reglas_activas?.length > 0           ||
+    contextoFinanciero.es_primera_sesion === true
   );
   const systemPromptFinal = tieneContexto
     ? systemPromptBase + '\n\n## CONTEXTO FINANCIERO ACTUAL\n\n' + formatearContexto(contextoFinanciero)
@@ -258,6 +259,22 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
     };
   }
 
+  // ── 8. Marcar primera conversación completada si corresponde ─────────────
+  // Solo actualiza si era primera sesión — evita writes innecesarios
+  if (contextoFinanciero?.es_primera_sesion === true) {
+    const { error: updateError } = await supabase
+      .from('empresas')
+      .update({ primera_conversacion_niko_completada: true })
+      .eq('id', empresa_id)
+      .eq('primera_conversacion_niko_completada', false);
+
+    if (updateError) {
+      console.warn('[nikoService] No se pudo marcar primera sesión completada:', updateError.message);
+    } else {
+      console.log('[nikoService] Primera sesión de Niko marcada como completada para empresa:', empresa_id);
+    }
+  }
+
   const tokens_usados = totalInputTokens + totalOutputTokens;
 
   return {
@@ -277,6 +294,7 @@ function formatearContexto(contexto) {
     datos_manuales,
     patrones_pendientes,
     reglas_activas,
+    es_primera_sesion,
   } = contexto;
 
   const fmt = n => Math.round(n).toLocaleString('es-CL');
@@ -353,7 +371,12 @@ ${topLines}`;
     ? `Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos.label}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`
     : '(Sin datos bancarios disponibles)';
 
-  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}`;
+  // ── Bloque ESTADO DEL CLIENTE ─────────────────────────────────────────────
+  const bloqueEstado = es_primera_sesion === true
+    ? `\n\n═════ ESTADO DEL CLIENTE ═════\n\nes_primera_sesion: true\n→ Usa la presentación formal completa en este mensaje.`
+    : `\n\n═════ ESTADO DEL CLIENTE ═════\n\nes_primera_sesion: false\n→ Cliente recurrente. Saluda de forma casual, sin presentarte.`;
+
+  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}${bloqueEstado}`;
 }
 
 module.exports = { chatWithNiko };
