@@ -86,17 +86,38 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
   });
 
   if (name === 'guardar_regla_categorizacion') {
-    return {
-      ok:     true,
-      mensaje: `[MOCK] Regla guardada: patrón "${input.patron}" → categoría "${input.categoria_nombre}"`,
-      datos: {
-        patron:                input.patron,
-        categoria_nombre:      input.categoria_nombre,
-        tipo_patron:           input.tipo_patron || 'contiene',
-        descripcion_aprendida: input.descripcion_aprendida || null,
-        mock:                  true,
-      },
-    };
+    // Require lazy para evitar potenciales circular imports al arrancar
+    const { crearRegla } = require('../../routes/categorias');
+
+    const supabase = getSupabase();
+
+    const resultado = await crearRegla(supabase, {
+      empresa_id,
+      patron:                input.patron,
+      categoria_nombre:      input.categoria_nombre,
+      tipo_patron:           input.tipo_patron || 'contiene',
+      descripcion_aprendida: input.descripcion_aprendida || null,
+      creada_por:            'niko',   // hardcodeado — nunca del input de Claude
+    });
+
+    if (resultado.ok) {
+      return {
+        ok:     true,
+        mensaje: resultado.mensaje,
+        datos: {
+          regla_id:                resultado.regla_id,
+          accion:                  resultado.accion,
+          transacciones_afectadas: resultado.transacciones_afectadas,
+          warning:                 resultado.warning,
+        },
+      };
+    } else {
+      return {
+        ok:      false,
+        mensaje: `Error al guardar regla: ${resultado.error}`,
+        codigo:  resultado.codigo,
+      };
+    }
   }
 
   console.error('[ejecutarTool] Tool desconocida:', name);
