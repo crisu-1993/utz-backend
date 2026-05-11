@@ -9,8 +9,14 @@
 //   { mensaje: string, historial?: Array<{ role: 'user'|'assistant', content: string }> }
 
 const express                    = require('express');
+const { createClient }           = require('@supabase/supabase-js');
 const { authMiddleware }         = require('../middleware/auth');
 const { chatWithNiko }           = require('../services/niko/nikoService');
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
 const router = express.Router();
 
@@ -77,9 +83,31 @@ router.post('/chat', authMiddleware, async (req, res) => {
       user_id
     );
 
+    // ── Verificar si Niko debe notificar EERR Ampliado ──
+    let eerrAmpliado = false;
+
+    const { data: empresaFlags } = await supabase
+      .from('empresas')
+      .select('eerr_ampliado_revelado, eerr_ampliado_niko_notificado')
+      .eq('id', empresa_id)
+      .single();
+
+    if (
+      empresaFlags?.eerr_ampliado_revelado &&
+      !empresaFlags?.eerr_ampliado_niko_notificado
+    ) {
+      await supabase
+        .from('empresas')
+        .update({ eerr_ampliado_niko_notificado: true })
+        .eq('id', empresa_id);
+
+      eerrAmpliado = true;
+    }
+
     return res.json({
       ok: true,
       respuesta,
+      eerr_ampliado_recien_revelado: eerrAmpliado,
       meta: { modelo_usado, tokens_usados },
     });
 
