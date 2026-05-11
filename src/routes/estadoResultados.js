@@ -33,16 +33,29 @@ function debeVisualizarse(cat, totalMonto) {
 router.get('/:empresa_id', authMiddleware, async (req, res) => {
   try {
     const { empresa_id } = req.params;
-    const { desde, hasta } = req.query;
+    const { desde, hasta, mes, anio } = req.query;
 
-    // Período por defecto: mes actual
+    // Período por defecto y conversión de mes/anio a fechas
     const ahora = new Date();
-    const fechaDesde = desde ||
-      new Date(ahora.getFullYear(), ahora.getMonth(), 1)
+    let fechaDesde, fechaHasta;
+
+    if (mes && anio) {
+      // Formato del frontend: ?mes=3&anio=2026
+      const m = parseInt(mes, 10);
+      const y = parseInt(anio, 10);
+      fechaDesde = new Date(y, m - 1, 1).toISOString().split('T')[0];
+      fechaHasta = new Date(y, m, 0).toISOString().split('T')[0];
+    } else if (desde && hasta) {
+      // Formato alternativo: ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD
+      fechaDesde = desde;
+      fechaHasta = hasta;
+    } else {
+      // Default: mes actual
+      fechaDesde = new Date(ahora.getFullYear(), ahora.getMonth(), 1)
         .toISOString().split('T')[0];
-    const fechaHasta = hasta ||
-      new Date(ahora.getFullYear(), ahora.getMonth() + 1, 0)
+      fechaHasta = new Date(ahora.getFullYear(), ahora.getMonth() + 1, 0)
         .toISOString().split('T')[0];
+    }
 
     // 1. Obtener categorías de la empresa con sus secciones
     const { data: categorias, error: errCat } = await supabase
@@ -140,7 +153,16 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
       }
     }
 
-    // 7. Detectar categorías candidatas a pregunta de Niko
+    // 7. Convertir secciones a array ordenado según jerarquía
+    const seccionesArray = JERARQUIA_EERR
+      .filter(j => seccionesVisibles[j.seccion])
+      .map(j => ({
+        nombre: seccionesVisibles[j.seccion].label,
+        categorias: seccionesVisibles[j.seccion].categorias,
+        total: seccionesVisibles[j.seccion].total
+      }));
+
+    // 8. Detectar categorías candidatas a pregunta de Niko
     // (usadas alguna vez, sin movimiento en 3+ meses)
     const tresM = new Date();
     tresM.setMonth(tresM.getMonth() - 3);
@@ -163,7 +185,7 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
         hasta: fechaHasta
       },
       eerr: {
-        secciones: seccionesVisibles,
+        secciones: seccionesArray,
         subtotales: {
           total_ingresos: totalIngresos,
           costo_directo: totalCostoDirecto,
