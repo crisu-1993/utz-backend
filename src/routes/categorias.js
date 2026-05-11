@@ -434,7 +434,38 @@ async function crearRegla(supabase, params) {
     .eq('id', categoria_id)
     .eq('empresa_id', empresa_id);
 
-  // ── 8. Retornar ───────────────────────────────────────────────────────────
+  // ── 8. Verificar si revelar EERR Ampliado ────────────────────────────────
+  // Threshold: 5 reglas aprendidas = Niko conoce el negocio
+  let eerrAmpliado = false;
+
+  const { count: totalReglas } = await supabase
+    .from('reglas_categorizacion')
+    .select('*', { count: 'exact', head: true })
+    .eq('empresa_id', empresa_id);
+
+  if (totalReglas >= 5) {
+    // Verificar si ya fue revelado
+    const { data: empresaFlag } = await supabase
+      .from('empresas')
+      .select('eerr_ampliado_revelado')
+      .eq('id', empresa_id)
+      .single();
+
+    if (!empresaFlag?.eerr_ampliado_revelado) {
+      // Activar flag
+      await supabase
+        .from('empresas')
+        .update({
+          eerr_ampliado_revelado:    true,
+          eerr_ampliado_revelado_at: new Date().toISOString(),
+        })
+        .eq('id', empresa_id);
+
+      eerrAmpliado = true;
+    }
+  }
+
+  // ── 9. Retornar ───────────────────────────────────────────────────────────
   const resultado = {
     ok:                      true,
     dry_run:                 false,
@@ -443,7 +474,8 @@ async function crearRegla(supabase, params) {
     transacciones_afectadas: txAfectadas,
     mensaje: `Regla ${accion}: ${txAfectadas} transacciones categorizadas como '${categoria_nombre}'`,
   };
-  if (warning) resultado.warning = warning;
+  if (warning)       resultado.warning                        = warning;
+  if (eerrAmpliado)  resultado.eerr_ampliado_recien_revelado  = true;
 
   return resultado;
 }

@@ -34,7 +34,7 @@ router.get('/', authSoloMiddleware, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('empresas')
-      .select('id, nombre, created_at')
+      .select('id, nombre, created_at, eerr_ampliado_revelado')
       .eq('owner_id', user_id)
       .order('created_at', { ascending: true });
 
