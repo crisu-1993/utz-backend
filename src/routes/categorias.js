@@ -417,7 +417,24 @@ async function crearRegla(supabase, params) {
     txAfectadas = txUpdated?.length ?? 0;
   }
 
-  // ── 7. Retornar ───────────────────────────────────────────────────────────
+  // ── 7. Actualizar visibilidad de categoría ───────────────────────────────
+  const { data: catActual } = await supabase
+    .from('categorias_eerr')
+    .select('primera_vez_usada_at')
+    .eq('id', categoria_id)
+    .single();
+
+  await supabase
+    .from('categorias_eerr')
+    .update({
+      ultimo_movimiento_at: new Date().toISOString(),
+      primera_vez_usada_at: catActual?.primera_vez_usada_at
+        ?? new Date().toISOString()
+    })
+    .eq('id', categoria_id)
+    .eq('empresa_id', empresa_id);
+
+  // ── 8. Retornar ───────────────────────────────────────────────────────────
   const resultado = {
     ok:                      true,
     dry_run:                 false,

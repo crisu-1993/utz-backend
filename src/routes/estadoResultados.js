@@ -1,219 +1,188 @@
 const express = require('express');
-const { createClient } = require('@supabase/supabase-js');
-
 const router = express.Router();
+const { createClient } = require('@supabase/supabase-js');
+const { authMiddleware } = require('../middleware/auth');
 
-// ─── Categorías fijas del sistema ────────────────────────────────────────────
-const CATEGORIAS_INGRESOS = [
-  'venta_productos',
-  'venta_servicios',
-  'otros_ingresos',
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+// Jerarquía del EERR Ampliado
+const JERARQUIA_EERR = [
+  { seccion: 'ingreso_principal',  label: 'Ingresos',              tipo: 'ingreso' },
+  { seccion: 'ingreso_secundario', label: 'Otros ingresos',        tipo: 'ingreso' },
+  { seccion: 'costo_directo',      label: 'Costos directos',       tipo: 'egreso'  },
+  { seccion: 'gasto_operacional',  label: 'Gastos operacionales',  tipo: 'egreso'  },
+  { seccion: 'gasto_marketing',    label: 'Marketing',             tipo: 'egreso'  },
+  { seccion: 'gasto_financiero',   label: 'Gastos financieros',    tipo: 'egreso'  },
+  { seccion: 'otros_egresos',      label: 'Otros egresos',         tipo: 'egreso'  },
 ];
 
-const CATEGORIAS_EGRESOS = [
-  'remuneraciones',
-  'arriendo',
-  'marketing',
-  'servicios_basicos',
-  'proveedores',
-  'impuestos',
-  'gastos_financieros',
-  'otros_gastos',
-];
-
-// ─── Cliente Supabase ─────────────────────────────────────────────────────────
-function getSupabase() {
-  return createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-  );
+// Helper: calcular si categoría debe mostrarse
+function debeVisualizarse(cat, totalMonto) {
+  // Nunca usada → no mostrar
+  if (!cat.primera_vez_usada_at) return false;
+  // Tiene monto este período → mostrar siempre
+  if (totalMonto > 0) return true;
+  // Fue usada alguna vez → mostrar (lógica de 3 meses la maneja Niko)
+  return true;
 }
 
-// ─── Construir rango de fechas desde los query params ─────────────────────────
-// ?mes=3&año=2024  → 2024-03-01 a 2024-03-31
-// ?año=2024        → 2024-01-01 a 2024-12-31
-// (sin params)     → sin filtro de fecha
-function buildDateRange(mes, anio) {
-  if (!anio) return { desde: null, hasta: null };
-
-  const year = parseInt(anio, 10);
-  if (isNaN(year)) return { desde: null, hasta: null };
-
-  if (mes) {
-    const month = parseInt(mes, 10);
-    if (isNaN(month) || month < 1 || month > 12) {
-      return { desde: null, hasta: null };
-    }
-    const desde = `${year}-${String(month).padStart(2, '0')}-01`;
-    // Último día del mes: primer día del mes siguiente menos 1
-    const ultimoDia = new Date(year, month, 0).getDate();
-    const hasta = `${year}-${String(month).padStart(2, '0')}-${ultimoDia}`;
-    return { desde, hasta };
-  }
-
-  // Solo año
-  return {
-    desde: `${year}-01-01`,
-    hasta: `${year}-12-31`,
-  };
-}
-
-// ─── Agrupar transacciones por categoría ─────────────────────────────────────
-function agruparPorCategoria(transacciones, categoriasFijas) {
-  const mapa = {};
-
-  // Inicializar todas las categorías fijas en cero
-  for (const cat of categoriasFijas) {
-    mapa[cat] = { total: 0, cantidad_transacciones: 0, transacciones: [] };
-  }
-
-  for (const t of transacciones) {
-    const cat = t.categoria_sugerida_ia;
-
-    // Si la categoría no es una de las fijas, ignorar (no debería pasar)
-    if (!mapa[cat]) continue;
-
-    mapa[cat].total                += Number(t.monto_original);
-    mapa[cat].cantidad_transacciones += 1;
-    mapa[cat].transacciones.push({
-      id:                    t.id,
-      fecha:                 t.fecha_transaccion,
-      descripcion:           t.descripcion_normalizada || t.descripcion_original,
-      monto:                 Number(t.monto_original),
-      confianza_deteccion:   t.confianza_deteccion !== null
-        ? Math.round(Number(t.confianza_deteccion) * 100)
-        : null,
-      estado:                t.estado,
-    });
-  }
-
-  // Redondear totales y ordenar transacciones por fecha descendente
-  for (const cat of categoriasFijas) {
-    mapa[cat].total = Math.round(mapa[cat].total);
-    mapa[cat].transacciones.sort((a, b) => b.fecha.localeCompare(a.fecha));
-  }
-
-  return mapa;
-}
-
-// ─── GET /api/estado-resultados/:empresa_id ───────────────────────────────────
-router.get('/:empresa_id', async (req, res) => {
-  const { empresa_id } = req.params;
-
-  if (!empresa_id) {
-    return res.status(400).json({ ok: false, error: 'empresa_id es requerido.' });
-  }
-
-  let mes, anio;
-
-  if (req.query.inicio) {
-    // Formato 2: ?inicio=2026-03-01&fin=2026-03-31
-    const fecha = new Date(req.query.inicio);
-    mes  = fecha.getMonth() + 1;
-    anio = fecha.getFullYear();
-  } else if (req.query.mes && (req.query.anio || req.query.año)) {
-    // Formato 1: ?mes=3&anio=2026 o ?mes=3&año=2026
-    mes  = req.query.mes;
-    anio = req.query.anio || req.query.año;
-  } else {
-    // Default: mes actual
-    const hoy = new Date();
-    mes  = hoy.getMonth() + 1;
-    anio = hoy.getFullYear();
-  }
-
-  const { desde, hasta } = buildDateRange(mes, anio);
-
-  const supabase = getSupabase();
-
+// GET /api/estado-resultados/:empresa_id?desde=YYYY-MM-DD&hasta=YYYY-MM-DD
+router.get('/:empresa_id', authMiddleware, async (req, res) => {
   try {
-    // ── Consultar todas las transacciones del período ─────────────────────────
-    let query = supabase
-      .from('transacciones_historicas')
-      .select(`
-        id,
-        fecha_transaccion,
-        descripcion_original,
-        descripcion_normalizada,
-        tipo,
-        monto_original,
-        categoria_sugerida_ia,
-        confianza_deteccion,
-        estado
-      `)
+    const { empresa_id } = req.params;
+    const { desde, hasta } = req.query;
+
+    // Período por defecto: mes actual
+    const ahora = new Date();
+    const fechaDesde = desde ||
+      new Date(ahora.getFullYear(), ahora.getMonth(), 1)
+        .toISOString().split('T')[0];
+    const fechaHasta = hasta ||
+      new Date(ahora.getFullYear(), ahora.getMonth() + 1, 0)
+        .toISOString().split('T')[0];
+
+    // 1. Obtener categorías de la empresa con sus secciones
+    const { data: categorias, error: errCat } = await supabase
+      .from('categorias_eerr')
+      .select('id, nombre, tipo, seccion_eerr, es_sistema, primera_vez_usada_at, ultimo_movimiento_at')
       .eq('empresa_id', empresa_id)
-      .order('fecha_transaccion', { ascending: true });
+      .eq('activa', true);
 
-    if (desde) query = query.gte('fecha_transaccion', desde);
-    if (hasta) query = query.lte('fecha_transaccion', hasta);
+    if (errCat) throw errCat;
 
-    const { data: transacciones, error } = await query;
+    // 2. Obtener transacciones del período con categoria_id
+    const { data: transacciones, error: errTx } = await supabase
+      .from('transacciones_historicas')
+      .select('monto, tipo, categoria_id')
+      .eq('empresa_id', empresa_id)
+      .gte('fecha', fechaDesde)
+      .lte('fecha', fechaHasta)
+      .not('categoria_id', 'is', null);
 
-    if (error) throw new Error(error.message);
+    if (errTx) throw errTx;
 
-    // ── Separar ingresos y egresos ────────────────────────────────────────────
-    const txIngresos = transacciones.filter(t => t.tipo === 'ingreso');
-    const txEgresos  = transacciones.filter(t => t.tipo === 'egreso');
+    // 3. Sumar montos por categoria_id
+    const montosPorCategoria = {};
+    for (const tx of transacciones) {
+      if (!montosPorCategoria[tx.categoria_id]) {
+        montosPorCategoria[tx.categoria_id] = 0;
+      }
+      montosPorCategoria[tx.categoria_id] += Math.abs(tx.monto);
+    }
 
-    // ── Calcular totales globales ─────────────────────────────────────────────
-    const totalIngresos = txIngresos.reduce((s, t) => s + Number(t.monto_original), 0);
-    const totalEgresos  = txEgresos.reduce((s, t) => s + Number(t.monto_original), 0);
-    const resultadoNeto = totalIngresos - totalEgresos;
-    const margenNeto    = totalIngresos > 0
-      ? Math.round((resultadoNeto / totalIngresos) * 10000) / 100   // 2 decimales
+    // 4. Construir EERR con jerarquía
+    const secciones = {};
+    for (const jerarquia of JERARQUIA_EERR) {
+      secciones[jerarquia.seccion] = {
+        label: jerarquia.tipo,
+        tipo: jerarquia.tipo,
+        total: 0,
+        categorias: []
+      };
+    }
+
+    // Categorías sin seccion_eerr van a otros_egresos por defecto
+    for (const cat of categorias) {
+      const seccion = cat.seccion_eerr || 'otros_egresos';
+      const monto = montosPorCategoria[cat.id] || 0;
+
+      if (!debeVisualizarse(cat, monto)) continue;
+      if (!secciones[seccion]) continue;
+
+      secciones[seccion].categorias.push({
+        id: cat.id,
+        nombre: cat.nombre,
+        monto,
+        es_sistema: cat.es_sistema,
+        primera_vez_usada_at: cat.primera_vez_usada_at,
+        ultimo_movimiento_at: cat.ultimo_movimiento_at
+      });
+      secciones[seccion].total += monto;
+    }
+
+    // 5. Calcular subtotales contables
+    const totalIngresos =
+      (secciones.ingreso_principal?.total || 0) +
+      (secciones.ingreso_secundario?.total || 0);
+
+    const totalCostoDirecto = secciones.costo_directo?.total || 0;
+    const margenBruto = totalIngresos - totalCostoDirecto;
+    const margenBrutoPct = totalIngresos > 0
+      ? ((margenBruto / totalIngresos) * 100).toFixed(1)
       : 0;
 
-    // ── Agrupar por categoría ─────────────────────────────────────────────────
-    const ingresosDetalle = agruparPorCategoria(txIngresos, CATEGORIAS_INGRESOS);
-    const egresosDetalle  = agruparPorCategoria(txEgresos,  CATEGORIAS_EGRESOS);
+    const totalGastosOp =
+      (secciones.gasto_operacional?.total || 0) +
+      (secciones.gasto_marketing?.total || 0);
 
-    // ── Construir período legible ─────────────────────────────────────────────
-    let periodoLabel = 'Todos los períodos';
-    if (desde && hasta) {
-      if (mes) {
-        const nombresMes = [
-          '', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
-          'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
-        ];
-        periodoLabel = `${nombresMes[parseInt(mes, 10)]} ${anio}`;
-      } else {
-        periodoLabel = `Año ${anio}`;
+    const resultadoOperacional = margenBruto - totalGastosOp;
+    const resultadoOperacionalPct = totalIngresos > 0
+      ? ((resultadoOperacional / totalIngresos) * 100).toFixed(1)
+      : 0;
+
+    const totalGastosFinancieros =
+      (secciones.gasto_financiero?.total || 0) +
+      (secciones.otros_egresos?.total || 0);
+
+    const utilidadNeta = resultadoOperacional - totalGastosFinancieros;
+    const utilidadNetaPct = totalIngresos > 0
+      ? ((utilidadNeta / totalIngresos) * 100).toFixed(1)
+      : 0;
+
+    // 6. Filtrar secciones vacías para respuesta limpia
+    const seccionesVisibles = {};
+    for (const [key, val] of Object.entries(secciones)) {
+      if (val.categorias.length > 0) {
+        seccionesVisibles[key] = val;
       }
     }
 
-    return res.json({
+    // 7. Detectar categorías candidatas a pregunta de Niko
+    // (usadas alguna vez, sin movimiento en 3+ meses)
+    const tresM = new Date();
+    tresM.setMonth(tresM.getMonth() - 3);
+    const candidatasRevision = categorias.filter(cat =>
+      cat.primera_vez_usada_at &&
+      cat.ultimo_movimiento_at &&
+      new Date(cat.ultimo_movimiento_at) < tresM &&
+      !montosPorCategoria[cat.id]
+    ).map(cat => ({
+      id: cat.id,
+      nombre: cat.nombre,
+      ultimo_movimiento_at: cat.ultimo_movimiento_at
+    }));
+
+    res.json({
       ok: true,
       empresa_id,
       periodo: {
-        label:  periodoLabel,
-        desde:  desde || null,
-        hasta:  hasta || null,
-        mes:    mes    ? parseInt(mes, 10)  : null,
-        año:    anio   ? parseInt(anio, 10) : null,
+        desde: fechaDesde,
+        hasta: fechaHasta
       },
-      resumen: {
-        total_ingresos:  Math.round(totalIngresos),
-        total_egresos:   Math.round(totalEgresos),
-        resultado_neto:  Math.round(resultadoNeto),
-        margen_neto_pct: margenNeto,
-        total_transacciones:        transacciones.length,
-        transacciones_sin_categoria: transacciones.filter(
-          t => !t.categoria_sugerida_ia
-        ).length,
+      eerr: {
+        secciones: seccionesVisibles,
+        subtotales: {
+          total_ingresos: totalIngresos,
+          costo_directo: totalCostoDirecto,
+          margen_bruto: margenBruto,
+          margen_bruto_pct: parseFloat(margenBrutoPct),
+          gastos_operacionales: totalGastosOp,
+          resultado_operacional: resultadoOperacional,
+          resultado_operacional_pct: parseFloat(resultadoOperacionalPct),
+          gastos_financieros: totalGastosFinancieros,
+          utilidad_neta: utilidadNeta,
+          utilidad_neta_pct: parseFloat(utilidadNetaPct)
+        }
       },
-      ingresos: {
-        total: Math.round(totalIngresos),
-        categorias: ingresosDetalle,
-      },
-      egresos: {
-        total: Math.round(totalEgresos),
-        categorias: egresosDetalle,
-      },
+      niko_revision: candidatasRevision
     });
 
   } catch (err) {
-    console.error('[estado-resultados] Error:', err.message);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error('EERR error:', err);
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
