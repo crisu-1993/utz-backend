@@ -69,10 +69,10 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
     // 2. Obtener transacciones del período con categoria_id
     const { data: transacciones, error: errTx } = await supabase
       .from('transacciones_historicas')
-      .select('monto, tipo, categoria_id')
+      .select('monto_original, tipo, categoria_id')
       .eq('empresa_id', empresa_id)
-      .gte('fecha', fechaDesde)
-      .lte('fecha', fechaHasta)
+      .gte('fecha_transaccion', fechaDesde)
+      .lte('fecha_transaccion', fechaHasta)
       .not('categoria_id', 'is', null);
 
     if (errTx) throw errTx;
@@ -83,7 +83,7 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
       if (!montosPorCategoria[tx.categoria_id]) {
         montosPorCategoria[tx.categoria_id] = 0;
       }
-      montosPorCategoria[tx.categoria_id] += Math.abs(tx.monto);
+      montosPorCategoria[tx.categoria_id] += Math.abs(tx.monto_original);
     }
 
     // 4. Construir EERR con jerarquía
