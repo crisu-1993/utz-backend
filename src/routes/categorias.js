@@ -7,17 +7,14 @@
 //     → Detecta patrones repetidos en transacciones sin categoria_id
 //       y devuelve candidatos ordenados por score para que Niko pregunte.
 
-const express            = require('express');
-const { createClient }   = require('@supabase/supabase-js');
-const { authMiddleware } = require('../middleware/auth');
+const express                  = require('express');
+const { createClient }         = require('@supabase/supabase-js');
+const { authMiddleware }       = require('../middleware/auth');
+const { SECCIONES_INGRESO }    = require('../utils/constantes');
 
 const router = express.Router();
 
 // ─── Configuración ────────────────────────────────────────────────────────────
-
-// Secciones del EERR que corresponden a ingresos. Todo lo demás es egreso.
-// Fuente de verdad única — usada en crearRegla y en /diagnostico.
-const SECCIONES_INGRESO = new Set(['ingreso_principal', 'ingreso_secundario']);
 
 const UMBRAL_MINIMO = 3;   // ocurrencias mínimas para incluir un patrón
 const LIMIT_DEFAULT = 10;
@@ -576,6 +573,99 @@ router.post('/crear-regla', authMiddleware, async (req, res) => {
   }
 });
 
+// ─── detectarDiagnostico (función reusable) ───────────────────────────────────
+//
+// Detecta el estado de categorización de una empresa.
+// Devuelve incoherencias tipo↔seccion_eerr y transacciones sin categorizar.
+// No valida ownership ni accede a req/res — solo recibe supabase y empresa_id.
+//
+// @param {object} supabase  - Cliente Supabase ya instanciado.
+// @param {string} empresa_id - UUID de la empresa.
+// @returns {Promise<{ empresa_id, incoherentes, sin_categorizar }>}
+
+async function detectarDiagnostico(supabase, empresa_id) {
+  const [txsResult, catsResult, sinCatResult] = await Promise.all([
+    // A) Transacciones con categoria_id asignado (candidatas a incoherencia)
+    supabase
+      .from('transacciones_historicas')
+      .select('id, fecha_transaccion, descripcion_normalizada, monto_original, tipo, categoria_id')
+      .eq('empresa_id', empresa_id)
+      .not('categoria_id', 'is', null)
+      .order('fecha_transaccion', { ascending: false })
+      .limit(200),
+
+    // Catálogo de categorías de la empresa (para join en JS)
+    supabase
+      .from('categorias_eerr')
+      .select('id, nombre, seccion_eerr')
+      .eq('empresa_id', empresa_id),
+
+    // B) Transacciones sin categoria_id (solo tipo, para conteo)
+    supabase
+      .from('transacciones_historicas')
+      .select('tipo')
+      .eq('empresa_id', empresa_id)
+      .is('categoria_id', null),
+  ]);
+
+  if (txsResult.error) {
+    console.error('[detectarDiagnostico] Error consultando transacciones:', txsResult.error.message);
+    throw new Error('Error al consultar transacciones');
+  }
+  if (catsResult.error) {
+    console.error('[detectarDiagnostico] Error consultando categorías:', catsResult.error.message);
+    throw new Error('Error al consultar categorías');
+  }
+  if (sinCatResult.error) {
+    console.error('[detectarDiagnostico] Error consultando sin categoría:', sinCatResult.error.message);
+    throw new Error('Error al consultar transacciones sin categoría');
+  }
+
+  // ── Caso A — detectar incoherencias (join + filtro en JS) ────────────────
+  const catMap = Object.fromEntries((catsResult.data || []).map(c => [c.id, c]));
+
+  const itemsIncoherentes = (txsResult.data || [])
+    .filter(tx => {
+      const cat = catMap[tx.categoria_id];
+      if (!cat) return false;
+      const tipoEsperado = SECCIONES_INGRESO.has(cat.seccion_eerr) ? 'ingreso' : 'egreso';
+      return tx.tipo !== tipoEsperado;
+    })
+    .map(tx => {
+      const cat = catMap[tx.categoria_id];
+      const tipoEsperado = SECCIONES_INGRESO.has(cat.seccion_eerr) ? 'ingreso' : 'egreso';
+      return {
+        id:                  tx.id,
+        fecha:               tx.fecha_transaccion,
+        descripcion:         tx.descripcion_normalizada,
+        monto:               tx.monto_original,
+        tipo_transaccion:    tx.tipo,
+        categoria_id:        tx.categoria_id,
+        categoria_nombre:    cat.nombre,
+        seccion_eerr_actual: cat.seccion_eerr,
+        tipo_esperado:       tipoEsperado,
+      };
+    });
+
+  // ── Caso B — conteo sin categorizar por tipo ──────────────────────────────
+  const sinCat    = sinCatResult.data || [];
+  const ingSinCat = sinCat.filter(t => t.tipo === 'ingreso').length;
+  const egrSinCat = sinCat.filter(t => t.tipo === 'egreso').length;
+
+  return {
+    empresa_id,
+    incoherentes: {
+      total: itemsIncoherentes.length,
+      items: itemsIncoherentes,
+    },
+    sin_categorizar: {
+      ingresos: ingSinCat,
+      egresos:  egrSinCat,
+      total:    ingSinCat + egrSinCat,
+    },
+  };
+}
+
 // ─── GET /diagnostico/:empresa_id ────────────────────────────────────────────
 //
 // Endpoint solo-lectura. Detecta:
@@ -594,11 +684,10 @@ router.post('/crear-regla', authMiddleware, async (req, res) => {
 router.get('/diagnostico/:empresa_id', authMiddleware, async (req, res) => {
   const { empresa_id: empresaId } = req.params;
   const { user_id }               = req.auth;
-
-  const supabase = getSupabase();
+  const supabase                  = getSupabase();
 
   try {
-    // ── 1. Validar ownership de empresa ──────────────────────────────────────
+    // Ownership check
     const { data: empresa, error: empresaErr } = await supabase
       .from('empresas')
       .select('id')
@@ -614,88 +703,8 @@ router.get('/diagnostico/:empresa_id', authMiddleware, async (req, res) => {
       return res.status(403).json({ ok: false, error: 'Sin permisos sobre esa empresa' });
     }
 
-    // ── 2. Queries en paralelo ────────────────────────────────────────────────
-    const [txsResult, catsResult, sinCatResult] = await Promise.all([
-      // A) Transacciones con categoria_id asignado (candidatas a incoherencia)
-      supabase
-        .from('transacciones_historicas')
-        .select('id, fecha_transaccion, descripcion_normalizada, monto_original, tipo, categoria_id')
-        .eq('empresa_id', empresaId)
-        .not('categoria_id', 'is', null)
-        .order('fecha_transaccion', { ascending: false })
-        .limit(200),
-
-      // Catálogo de categorías de la empresa (para join en JS)
-      supabase
-        .from('categorias_eerr')
-        .select('id, nombre, seccion_eerr')
-        .eq('empresa_id', empresaId),
-
-      // B) Transacciones sin categoria_id (solo tipo, para conteo)
-      supabase
-        .from('transacciones_historicas')
-        .select('tipo')
-        .eq('empresa_id', empresaId)
-        .is('categoria_id', null),
-    ]);
-
-    if (txsResult.error) {
-      console.error('[diagnostico] Error consultando transacciones:', txsResult.error.message);
-      return res.status(500).json({ ok: false, error: 'Error al consultar transacciones' });
-    }
-    if (catsResult.error) {
-      console.error('[diagnostico] Error consultando categorías:', catsResult.error.message);
-      return res.status(500).json({ ok: false, error: 'Error al consultar categorías' });
-    }
-    if (sinCatResult.error) {
-      console.error('[diagnostico] Error consultando sin categoría:', sinCatResult.error.message);
-      return res.status(500).json({ ok: false, error: 'Error al consultar transacciones sin categoría' });
-    }
-
-    // ── 3. Caso A — detectar incoherencias (join + filtro en JS) ─────────────
-    const catMap = Object.fromEntries((catsResult.data || []).map(c => [c.id, c]));
-
-    const itemsIncoherentes = (txsResult.data || [])
-      .filter(tx => {
-        const cat = catMap[tx.categoria_id];
-        if (!cat) return false;
-        const tipoEsperado = SECCIONES_INGRESO.has(cat.seccion_eerr) ? 'ingreso' : 'egreso';
-        return tx.tipo !== tipoEsperado;
-      })
-      .map(tx => {
-        const cat = catMap[tx.categoria_id];
-        const tipoEsperado = SECCIONES_INGRESO.has(cat.seccion_eerr) ? 'ingreso' : 'egreso';
-        return {
-          id:                  tx.id,
-          fecha:               tx.fecha_transaccion,
-          descripcion:         tx.descripcion_normalizada,
-          monto:               tx.monto_original,
-          tipo_transaccion:    tx.tipo,
-          categoria_id:        tx.categoria_id,
-          categoria_nombre:    cat.nombre,
-          seccion_eerr_actual: cat.seccion_eerr,
-          tipo_esperado:       tipoEsperado,
-        };
-      });
-
-    // ── 4. Caso B — conteo sin categorizar por tipo ───────────────────────────
-    const sinCat      = sinCatResult.data || [];
-    const ingSinCat   = sinCat.filter(t => t.tipo === 'ingreso').length;
-    const egrSinCat   = sinCat.filter(t => t.tipo === 'egreso').length;
-
-    return res.json({
-      ok:         true,
-      empresa_id: empresaId,
-      incoherentes: {
-        total: itemsIncoherentes.length,
-        items: itemsIncoherentes,
-      },
-      sin_categorizar: {
-        ingresos: ingSinCat,
-        egresos:  egrSinCat,
-        total:    ingSinCat + egrSinCat,
-      },
-    });
+    const resultado = await detectarDiagnostico(supabase, empresaId);
+    return res.json({ ok: true, ...resultado });
 
   } catch (err) {
     console.error('[diagnostico] Error inesperado:', err.message);
@@ -707,4 +716,5 @@ module.exports                        = router;
 module.exports.detectarPatrones       = detectarPatrones;
 module.exports.extraerPatronClave     = extraerPatronClave;
 module.exports.calcularScore          = calcularScore;
+module.exports.detectarDiagnostico    = detectarDiagnostico;
 module.exports.crearRegla             = crearRegla;
