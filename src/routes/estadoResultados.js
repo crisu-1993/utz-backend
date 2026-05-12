@@ -90,7 +90,7 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
     const secciones = {};
     for (const jerarquia of JERARQUIA_EERR) {
       secciones[jerarquia.seccion] = {
-        label: jerarquia.tipo,
+        label: jerarquia.label,
         tipo: jerarquia.tipo,
         total: 0,
         categorias: []
