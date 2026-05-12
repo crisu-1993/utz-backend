@@ -317,10 +317,10 @@ async function crearRegla(supabase, params) {
   // ── 2. Construir WHERE para ILIKE ─────────────────────────────────────────
   const whereValue = buildWherePatron(patron.trim().toLowerCase(), tipo_patron);
 
-  // ── 3. Resolver categoria_nombre → categoria_id ───────────────────────────
+  // ── 3. Resolver categoria_nombre → categoria_id (+ seccion_eerr para validación) ──
   const { data: catData, error: catErr } = await supabase
     .from('categorias_eerr')
-    .select('id')
+    .select('id, seccion_eerr')
     .eq('empresa_id', empresa_id)
     .eq('nombre', categoria_nombre)
     .eq('activa', true)
@@ -337,17 +337,23 @@ async function crearRegla(supabase, params) {
       error:  `La categoría '${categoria_nombre}' no existe o no está activa para esta empresa`,
     };
   }
-  const categoria_id = catData.id;
+  const categoria_id   = catData.id;
+  const esIngresoCat   = ['ingreso_principal', 'ingreso_secundario'].includes(catData.seccion_eerr);
+  const tipoEsperado   = esIngresoCat ? 'ingreso' : 'egreso';
+  const tipoOpuesto    = esIngresoCat ? 'egreso'  : 'ingreso';
 
-  // ── 4. Contar transacciones afectadas (usado en dry_run y en respuesta) ───
-  const { data: txCount, error: countErr } = await supabase
+  // ── 4. Obtener TODAS las transacciones que el patrón afectaría (sin filtro tipo) ──
+  // Necesario para detectar incoherencias antes de ejecutar el UPDATE.
+  const { data: txCandidatas, error: countErr } = await supabase
     .from('transacciones_historicas')
-    .select('id')
+    .select('id, tipo, descripcion_normalizada')
     .eq('empresa_id', empresa_id)
     .is('categoria_id', null)
     .ilike('descripcion_normalizada', whereValue);
 
-  const transacciones_afectadas = countErr ? 0 : (txCount?.length ?? 0);
+  const txCoherentes    = countErr ? [] : (txCandidatas || []).filter(t => t.tipo === tipoEsperado);
+  const txIncoherentes  = countErr ? [] : (txCandidatas || []).filter(t => t.tipo === tipoOpuesto);
+  const transacciones_afectadas = txCoherentes.length;
 
   // ── 5. DRY RUN ────────────────────────────────────────────────────────────
   if (dry_run) {
@@ -397,14 +403,16 @@ async function crearRegla(supabase, params) {
 
   const regla_id = upsertData.id;
 
-  // ── 6c. UPDATE transacciones existentes ───────────────────────────────────
+  // ── 6c. UPDATE transacciones existentes (solo tipo coherente) ───────────────
   let warning;
-  let txAfectadas = transacciones_afectadas;  // valor del count previo
+  let txAfectadas = 0;
+  let incoherencias_detectadas = null;
 
   const { data: txUpdated, error: updateErr } = await supabase
     .from('transacciones_historicas')
     .update({ categoria_id })
     .eq('empresa_id', empresa_id)
+    .eq('tipo', tipoEsperado)
     .is('categoria_id', null)
     .ilike('descripcion_normalizada', whereValue)
     .select('id');
@@ -415,6 +423,25 @@ async function crearRegla(supabase, params) {
     txAfectadas = 0;
   } else {
     txAfectadas = txUpdated?.length ?? 0;
+  }
+
+  // ── 6d. Detectar y reportar incoherencias de tipo ─────────────────────────
+  if (txIncoherentes.length > 0) {
+    const ejemplos = txIncoherentes
+      .slice(0, 3)
+      .map(t => t.descripcion_normalizada)
+      .filter(Boolean);
+
+    incoherencias_detectadas = {
+      tipo_opuesto_count: txIncoherentes.length,
+      tipo_categoria:     tipoEsperado,
+      ejemplos,
+      mensaje_para_niko:
+        `Apliqué la regla a ${txAfectadas} transacción(es) de tipo ${tipoEsperado}. ` +
+        `Detecté ${txIncoherentes.length} transacción(es) de tipo ${tipoOpuesto} con el mismo patrón ` +
+        `que NO categoricé porque la categoría '${categoria_nombre}' es de ${tipoEsperado}s. ` +
+        `Pregunta al usuario cómo quiere categorizar esas ${txIncoherentes.length} transacción(es).`,
+    };
   }
 
   // ── 7. Actualizar visibilidad de categoría ───────────────────────────────
@@ -474,8 +501,9 @@ async function crearRegla(supabase, params) {
     transacciones_afectadas: txAfectadas,
     mensaje: `Regla ${accion}: ${txAfectadas} transacciones categorizadas como '${categoria_nombre}'`,
   };
-  if (warning)       resultado.warning                        = warning;
-  if (eerrAmpliado)  resultado.eerr_ampliado_recien_revelado  = true;
+  if (warning)                resultado.warning                        = warning;
+  if (eerrAmpliado)           resultado.eerr_ampliado_recien_revelado  = true;
+  if (incoherencias_detectadas) resultado.incoherencias_detectadas     = incoherencias_detectadas;
 
   return resultado;
 }

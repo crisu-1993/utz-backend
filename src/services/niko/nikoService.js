@@ -15,7 +15,7 @@ const MODEL = 'claude-sonnet-4-6';
 const NIKO_TOOLS = [
   {
     name: 'guardar_regla_categorizacion',
-    description: "Guarda una regla permanente que asocia un patrón de texto con una categoría del EERR. Llama esta tool ÚNICAMENTE cuando el usuario confirmó de forma explícita y clara (ejemplos de confirmación válida: 'sí', 'dale', 'listo', 'hagámoslo', 'perfecto', 'ya', 'ok', 'bueno', 'sí po'). NUNCA la llames si el usuario dudó, preguntó algo más, cambió de tema, o no respondió con claridad afirmativa. Si hay duda, primero aclara y espera confirmación.",
+    description: "Guarda una regla permanente que asocia un patrón de texto con una categoría del EERR. Llama esta tool ÚNICAMENTE cuando el usuario confirmó de forma explícita y clara (ejemplos de confirmación válida: 'sí', 'dale', 'listo', 'hagámoslo', 'perfecto', 'ya', 'ok', 'bueno', 'sí po'). NUNCA la llames si el usuario dudó, preguntó algo más, cambió de tema, o no respondió con claridad afirmativa. Si hay duda, primero aclara y espera confirmación. IMPORTANTE: Antes de llamar esta tool, valida con el usuario que la categoría elegida sea coherente con el tipo de las transacciones (Ventas/Otros ingresos solo para ingresos; el resto solo para egresos). Si el bloque es mixto (hay tanto ingresos como egresos con ese patrón), pregúntale al usuario antes de aplicar. Si después de aplicar la regla recibes incoherencias_detectadas en el resultado, informa al usuario y pregunta cómo categorizar las transacciones pendientes.",
     input_schema: {
       type: 'object',
       properties: {
@@ -109,6 +109,7 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
           accion:                  resultado.accion,
           transacciones_afectadas: resultado.transacciones_afectadas,
           warning:                 resultado.warning,
+          incoherencias_detectadas: resultado.incoherencias_detectadas ?? null,
         },
       };
     } else {
