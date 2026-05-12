@@ -15,6 +15,10 @@ const router = express.Router();
 
 // ─── Configuración ────────────────────────────────────────────────────────────
 
+// Secciones del EERR que corresponden a ingresos. Todo lo demás es egreso.
+// Fuente de verdad única — usada en crearRegla y en /diagnostico.
+const SECCIONES_INGRESO = new Set(['ingreso_principal', 'ingreso_secundario']);
+
 const UMBRAL_MINIMO = 3;   // ocurrencias mínimas para incluir un patrón
 const LIMIT_DEFAULT = 10;
 const LIMIT_MAX     = 50;
@@ -338,7 +342,7 @@ async function crearRegla(supabase, params) {
     };
   }
   const categoria_id   = catData.id;
-  const esIngresoCat   = ['ingreso_principal', 'ingreso_secundario'].includes(catData.seccion_eerr);
+  const esIngresoCat   = SECCIONES_INGRESO.has(catData.seccion_eerr);
   const tipoEsperado   = esIngresoCat ? 'ingreso' : 'egreso';
   const tipoOpuesto    = esIngresoCat ? 'egreso'  : 'ingreso';
 
@@ -568,6 +572,133 @@ router.post('/crear-regla', authMiddleware, async (req, res) => {
 
   } catch (err) {
     console.error('[crear-regla] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
+// ─── GET /diagnostico/:empresa_id ────────────────────────────────────────────
+//
+// Endpoint solo-lectura. Detecta:
+//   A) Transacciones con categoria_id asignado pero cuyo tipo no coincide
+//      con el tipo derivado de categorias_eerr.seccion_eerr (incoherentes).
+//   B) Transacciones sin categoria_id, agrupadas por tipo.
+//
+// Respuesta:
+//   {
+//     ok: true,
+//     empresa_id: "...",
+//     incoherentes: { total: N, items: [...] },
+//     sin_categorizar: { ingresos: N, egresos: M, total: N+M }
+//   }
+
+router.get('/diagnostico/:empresa_id', authMiddleware, async (req, res) => {
+  const { empresa_id: empresaId } = req.params;
+  const { user_id }               = req.auth;
+
+  const supabase = getSupabase();
+
+  try {
+    // ── 1. Validar ownership de empresa ──────────────────────────────────────
+    const { data: empresa, error: empresaErr } = await supabase
+      .from('empresas')
+      .select('id')
+      .eq('id', empresaId)
+      .eq('owner_id', user_id)
+      .maybeSingle();
+
+    if (empresaErr) {
+      console.error('[diagnostico] Error validando empresa:', empresaErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al validar empresa' });
+    }
+    if (!empresa) {
+      return res.status(403).json({ ok: false, error: 'Sin permisos sobre esa empresa' });
+    }
+
+    // ── 2. Queries en paralelo ────────────────────────────────────────────────
+    const [txsResult, catsResult, sinCatResult] = await Promise.all([
+      // A) Transacciones con categoria_id asignado (candidatas a incoherencia)
+      supabase
+        .from('transacciones_historicas')
+        .select('id, fecha_transaccion, descripcion_normalizada, monto_original, tipo, categoria_id')
+        .eq('empresa_id', empresaId)
+        .not('categoria_id', 'is', null)
+        .order('fecha_transaccion', { ascending: false })
+        .limit(200),
+
+      // Catálogo de categorías de la empresa (para join en JS)
+      supabase
+        .from('categorias_eerr')
+        .select('id, nombre, seccion_eerr')
+        .eq('empresa_id', empresaId),
+
+      // B) Transacciones sin categoria_id (solo tipo, para conteo)
+      supabase
+        .from('transacciones_historicas')
+        .select('tipo')
+        .eq('empresa_id', empresaId)
+        .is('categoria_id', null),
+    ]);
+
+    if (txsResult.error) {
+      console.error('[diagnostico] Error consultando transacciones:', txsResult.error.message);
+      return res.status(500).json({ ok: false, error: 'Error al consultar transacciones' });
+    }
+    if (catsResult.error) {
+      console.error('[diagnostico] Error consultando categorías:', catsResult.error.message);
+      return res.status(500).json({ ok: false, error: 'Error al consultar categorías' });
+    }
+    if (sinCatResult.error) {
+      console.error('[diagnostico] Error consultando sin categoría:', sinCatResult.error.message);
+      return res.status(500).json({ ok: false, error: 'Error al consultar transacciones sin categoría' });
+    }
+
+    // ── 3. Caso A — detectar incoherencias (join + filtro en JS) ─────────────
+    const catMap = Object.fromEntries((catsResult.data || []).map(c => [c.id, c]));
+
+    const itemsIncoherentes = (txsResult.data || [])
+      .filter(tx => {
+        const cat = catMap[tx.categoria_id];
+        if (!cat) return false;
+        const tipoEsperado = SECCIONES_INGRESO.has(cat.seccion_eerr) ? 'ingreso' : 'egreso';
+        return tx.tipo !== tipoEsperado;
+      })
+      .map(tx => {
+        const cat = catMap[tx.categoria_id];
+        const tipoEsperado = SECCIONES_INGRESO.has(cat.seccion_eerr) ? 'ingreso' : 'egreso';
+        return {
+          id:                  tx.id,
+          fecha:               tx.fecha_transaccion,
+          descripcion:         tx.descripcion_normalizada,
+          monto:               tx.monto_original,
+          tipo_transaccion:    tx.tipo,
+          categoria_id:        tx.categoria_id,
+          categoria_nombre:    cat.nombre,
+          seccion_eerr_actual: cat.seccion_eerr,
+          tipo_esperado:       tipoEsperado,
+        };
+      });
+
+    // ── 4. Caso B — conteo sin categorizar por tipo ───────────────────────────
+    const sinCat      = sinCatResult.data || [];
+    const ingSinCat   = sinCat.filter(t => t.tipo === 'ingreso').length;
+    const egrSinCat   = sinCat.filter(t => t.tipo === 'egreso').length;
+
+    return res.json({
+      ok:         true,
+      empresa_id: empresaId,
+      incoherentes: {
+        total: itemsIncoherentes.length,
+        items: itemsIncoherentes,
+      },
+      sin_categorizar: {
+        ingresos: ingSinCat,
+        egresos:  egrSinCat,
+        total:    ingSinCat + egrSinCat,
+      },
+    });
+
+  } catch (err) {
+    console.error('[diagnostico] Error inesperado:', err.message);
     return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
   }
 });
