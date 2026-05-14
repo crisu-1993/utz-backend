@@ -173,6 +173,62 @@ router.get('/verificar-recordatorio/:empresa_id', authMiddleware, async (req, re
       return res.status(403).json({ ok: false, error: 'Sin permisos sobre esa empresa' });
     }
 
+    // ──────────────────────────────────────────────────────────────
+    // NUEVO: Primero verificar si hay recordatorios sin leer en BD.
+    // Si existen, devolver el más reciente y auto-marcar los antiguos.
+    // Esto garantiza que un recordatorio creado siga visible aunque el
+    // usuario recargue la página, hasta que él lo marque como leído.
+    // ──────────────────────────────────────────────────────────────
+
+    const { data: noLeidos, error: noLeidosErr } = await supabase
+      .from('niko_recordatorios')
+      .select('id, payload, created_at')
+      .eq('empresa_id', empresa_id)
+      .eq('tipo', TIPO_RECORDATORIO_PENDIENTES)
+      .eq('leido', false)
+      .order('created_at', { ascending: false });
+
+    if (noLeidosErr) {
+      console.error('[verificar-recordatorio] Error consultando no leídos:', noLeidosErr.message);
+      return res.status(500).json({ ok: false, error: 'Error consultando recordatorios sin leer' });
+    }
+
+    if (noLeidos && noLeidos.length > 0) {
+      const masReciente = noLeidos[0];
+
+      // Si hay 2+ sin leer, auto-marcar los antiguos como leídos
+      if (noLeidos.length > 1) {
+        const idsAntiguos = noLeidos.slice(1).map((r) => r.id);
+        const { error: marcarErr } = await supabase
+          .from('niko_recordatorios')
+          .update({ leido: true, read_at: new Date().toISOString() })
+          .in('id', idsAntiguos);
+
+        if (marcarErr) {
+          // No bloqueamos el flujo si falla la limpieza, solo logueamos.
+          console.error('[verificar-recordatorio] Error auto-marcando antiguos:', marcarErr.message);
+        } else {
+          console.log(`[verificar-recordatorio] Auto-marcados ${idsAntiguos.length} recordatorio(s) antiguo(s) como leídos.`);
+        }
+      }
+
+      // Devolver el más reciente reutilizando el mensaje del payload guardado.
+      const numero = masReciente.payload?.numero_recordatorio ?? 1;
+      const mensaje = masReciente.payload?.mensaje ?? '';
+
+      return res.json({
+        ok:                  true,
+        debe_enviar:         true,
+        numero_recordatorio: numero,
+        mensaje,
+        recordatorio_id:     masReciente.id,
+      });
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Si no hay sin leer, continúa con la lógica actual de cadencia.
+    // ──────────────────────────────────────────────────────────────
+
     // 2) Detectar estado actual de pendientes
     const diagnostico          = await detectarDiagnostico(supabase, empresa_id);
     const sin_categorizar_total = diagnostico.sin_categorizar.total;
