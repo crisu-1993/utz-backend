@@ -429,4 +429,150 @@ router.post('/recordatorios/:id/marcar-leido', authMiddleware, async (req, res) 
   }
 });
 
+// ─── GET /api/niko/recordatorios/:empresa_id ─────────────────────────────────
+//
+// Lista los recordatorios de Niko de una empresa.
+// Query params opcionales:
+//   ?filtro=todos (default) | no_leidos | leidos
+//   ?limit=50 (default) | máximo 200
+
+router.get('/recordatorios/:empresa_id', authMiddleware, async (req, res) => {
+  const { user_id } = req.auth;
+  const empresa_id  = req.params.empresa_id;
+  const filtro      = (req.query.filtro || 'todos').toLowerCase();
+  let limit         = parseInt(req.query.limit || '50', 10);
+  if (isNaN(limit) || limit < 1) limit = 50;
+  if (limit > 200) limit = 200;
+
+  const filtrosValidos = ['todos', 'no_leidos', 'leidos'];
+  if (!filtrosValidos.includes(filtro)) {
+    return res.status(400).json({
+      ok:    false,
+      error: `Filtro inválido. Use uno de: ${filtrosValidos.join(', ')}`,
+    });
+  }
+
+  try {
+    // Ownership check
+    const { data: empresa, error: empresaErr } = await supabase
+      .from('empresas')
+      .select('id')
+      .eq('id', empresa_id)
+      .eq('owner_id', user_id)
+      .maybeSingle();
+
+    if (empresaErr) {
+      console.error('[listar-recordatorios] Error validando empresa:', empresaErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al validar empresa' });
+    }
+    if (!empresa) {
+      return res.status(403).json({ ok: false, error: 'Sin permisos sobre esa empresa' });
+    }
+
+    // Query base
+    let query = supabase
+      .from('niko_recordatorios')
+      .select('id, tipo, payload, leido, read_at, created_at')
+      .eq('empresa_id', empresa_id)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (filtro === 'no_leidos') {
+      query = query.eq('leido', false);
+    } else if (filtro === 'leidos') {
+      query = query.eq('leido', true);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('[listar-recordatorios] Error consultando BD:', error.message);
+      return res.status(500).json({ ok: false, error: 'Error consultando recordatorios' });
+    }
+
+    // Contador de no leídos para badge del frontend
+    const { count: countNoLeidos, error: countErr } = await supabase
+      .from('niko_recordatorios')
+      .select('id', { count: 'exact', head: true })
+      .eq('empresa_id', empresa_id)
+      .eq('leido', false);
+
+    if (countErr) {
+      console.error('[listar-recordatorios] Error contando no leídos:', countErr.message);
+    }
+
+    return res.json({
+      ok:             true,
+      filtro,
+      total:          data.length,
+      no_leidos_total: countNoLeidos ?? 0,
+      recordatorios:  data,
+    });
+
+  } catch (err) {
+    console.error('[listar-recordatorios] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
+// ─── DELETE /api/niko/recordatorios/:id ──────────────────────────────────────
+//
+// Elimina un recordatorio físicamente de BD.
+// Requiere ownership de la empresa a la que pertenece el recordatorio.
+
+router.delete('/recordatorios/:id', authMiddleware, async (req, res) => {
+  const { user_id }     = req.auth;
+  const recordatorio_id = req.params.id;
+
+  try {
+    // Obtener el recordatorio + su empresa_id
+    const { data: recordatorio, error: recErr } = await supabase
+      .from('niko_recordatorios')
+      .select('id, empresa_id')
+      .eq('id', recordatorio_id)
+      .maybeSingle();
+
+    if (recErr) {
+      console.error('[eliminar-recordatorio] Error consultando:', recErr.message);
+      return res.status(500).json({ ok: false, error: 'Error consultando recordatorio' });
+    }
+    if (!recordatorio) {
+      return res.status(404).json({ ok: false, error: 'Recordatorio no encontrado' });
+    }
+
+    // Ownership check vía empresa
+    const { data: empresa, error: empresaErr } = await supabase
+      .from('empresas')
+      .select('id')
+      .eq('id', recordatorio.empresa_id)
+      .eq('owner_id', user_id)
+      .maybeSingle();
+
+    if (empresaErr) {
+      console.error('[eliminar-recordatorio] Error validando ownership:', empresaErr.message);
+      return res.status(500).json({ ok: false, error: 'Error validando permisos' });
+    }
+    if (!empresa) {
+      return res.status(403).json({ ok: false, error: 'Sin permisos sobre ese recordatorio' });
+    }
+
+    // Eliminar
+    const { error: deleteErr } = await supabase
+      .from('niko_recordatorios')
+      .delete()
+      .eq('id', recordatorio_id);
+
+    if (deleteErr) {
+      console.error('[eliminar-recordatorio] Error al eliminar:', deleteErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al eliminar recordatorio' });
+    }
+
+    return res.json({ ok: true, deleted: true, id: recordatorio_id });
+
+  } catch (err) {
+    console.error('[eliminar-recordatorio] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
 module.exports = router;
