@@ -109,8 +109,9 @@ router.post('/chat', authMiddleware, async (req, res) => {
     supabase.from('niko_conversaciones').insert({
       empresa_id,
       user_id,
-      rol:     'user',
-      mensaje: mensajeTrimmed,
+      rol:             'user',
+      mensaje:         mensajeTrimmed,
+      tools_invocadas: [],
     }).then(({ error }) => {
       if (error) console.error('[niko/chat] Error persistiendo mensaje user:', error.message);
     });
