@@ -126,7 +126,7 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
     if (sinCategorizarIngreso > 0) {
       secciones['otros_ingresos'].categorias.push({
         id:              null,
-        nombre:          'Sin categorizar',
+        nombre:          'Otros ingresos (sin categorizar)',
         monto:           sinCategorizarIngreso,
         es_sistema:      false,
         sin_categorizar: true,
@@ -136,7 +136,7 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
     if (sinCategorizarEgreso > 0) {
       secciones['otros_egresos'].categorias.push({
         id:              null,
-        nombre:          'Sin categorizar',
+        nombre:          'Otros egresos (sin categorizar)',
         monto:           sinCategorizarEgreso,
         es_sistema:      false,
         sin_categorizar: true,
