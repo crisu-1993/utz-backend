@@ -209,6 +209,7 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
 
   let totalInputTokens  = response.usage?.input_tokens  || 0;
   let totalOutputTokens = response.usage?.output_tokens || 0;
+  const toolsUsadas     = [];
 
   // ── 7. Tool calling: segunda ronda si Claude pidió usar una tool ──────────
   if (response.stop_reason === 'tool_use') {
@@ -216,6 +217,7 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
 
     if (toolUseBlock) {
       console.log('[chatWithNiko] Claude pidió tool:', toolUseBlock.name);
+      toolsUsadas.push(toolUseBlock.name);
 
       const toolResult = await ejecutarTool(toolUseBlock, empresa_id, user_id);
 
@@ -282,6 +284,7 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
     respuesta,
     modelo_usado:  response.model,
     tokens_usados,
+    tools_usadas:  toolsUsadas,
   };
 }
 

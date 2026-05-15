@@ -102,12 +102,41 @@ router.post('/chat', authMiddleware, async (req, res) => {
   }
 
   try {
-    const { respuesta, modelo_usado, tokens_usados } = await chatWithNiko(
+    const inicio         = Date.now();
+    const mensajeTrimmed = String(mensaje).trim();
+
+    // Persistir mensaje del usuario (fire-and-forget: no bloquea si falla)
+    supabase.from('niko_conversaciones').insert({
       empresa_id,
-      String(mensaje).trim(),
+      user_id,
+      rol:     'user',
+      mensaje: mensajeTrimmed,
+    }).then(({ error }) => {
+      if (error) console.error('[niko/chat] Error persistiendo mensaje user:', error.message);
+    });
+
+    const { respuesta, modelo_usado, tokens_usados, tools_usadas } = await chatWithNiko(
+      empresa_id,
+      mensajeTrimmed,
       historial,
       user_id
     );
+
+    const latencia_ms = Date.now() - inicio;
+
+    // Persistir respuesta del assistant (fire-and-forget: no bloquea si falla)
+    supabase.from('niko_conversaciones').insert({
+      empresa_id,
+      user_id,
+      rol:             'assistant',
+      mensaje:         respuesta,
+      tools_invocadas: tools_usadas || [],
+      tokens_usados,
+      modelo_usado,
+      latencia_ms,
+    }).then(({ error }) => {
+      if (error) console.error('[niko/chat] Error persistiendo respuesta assistant:', error.message);
+    });
 
     // ── Verificar si Niko debe notificar EERR Ampliado ──
     let eerrAmpliado = false;
@@ -571,6 +600,117 @@ router.delete('/recordatorios/:id', authMiddleware, async (req, res) => {
 
   } catch (err) {
     console.error('[eliminar-recordatorio] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
+// ─── GET /api/niko/historial/:empresa_id ─────────────────────────────────────
+//
+// Devuelve el historial completo de conversación con Niko de una empresa.
+// Ordenado ASC por created_at para reconstruir cronológicamente.
+// Limit configurable, default 100, max 500.
+
+router.get('/historial/:empresa_id', authMiddleware, async (req, res) => {
+  const { user_id } = req.auth;
+  const empresa_id  = req.params.empresa_id;
+  let limit         = parseInt(req.query.limit || '100', 10);
+  if (isNaN(limit) || limit < 1) limit = 100;
+  if (limit > 500) limit = 500;
+
+  try {
+    // Ownership check
+    const { data: empresa, error: empresaErr } = await supabase
+      .from('empresas')
+      .select('id')
+      .eq('id', empresa_id)
+      .eq('owner_id', user_id)
+      .maybeSingle();
+
+    if (empresaErr) {
+      console.error('[historial] Error validando empresa:', empresaErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al validar empresa' });
+    }
+    if (!empresa) {
+      return res.status(403).json({ ok: false, error: 'Sin permisos sobre esa empresa' });
+    }
+
+    const { data, error } = await supabase
+      .from('niko_conversaciones')
+      .select('id, rol, mensaje, tools_invocadas, created_at')
+      .eq('empresa_id', empresa_id)
+      .order('created_at', { ascending: true })
+      .limit(limit);
+
+    if (error) {
+      console.error('[historial] Error consultando BD:', error.message);
+      return res.status(500).json({ ok: false, error: 'Error consultando historial' });
+    }
+
+    return res.json({
+      ok:       true,
+      total:    data.length,
+      mensajes: data,
+    });
+
+  } catch (err) {
+    console.error('[historial] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
+// ─── DELETE /api/niko/historial/:empresa_id ───────────────────────────────────
+//
+// Borra TODO el historial de conversación de Niko de una empresa.
+// Ownership check obligatorio.
+
+router.delete('/historial/:empresa_id', authMiddleware, async (req, res) => {
+  const { user_id } = req.auth;
+  const empresa_id  = req.params.empresa_id;
+
+  try {
+    // Ownership check
+    const { data: empresa, error: empresaErr } = await supabase
+      .from('empresas')
+      .select('id')
+      .eq('id', empresa_id)
+      .eq('owner_id', user_id)
+      .maybeSingle();
+
+    if (empresaErr) {
+      console.error('[borrar-historial] Error validando empresa:', empresaErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al validar empresa' });
+    }
+    if (!empresa) {
+      return res.status(403).json({ ok: false, error: 'Sin permisos sobre esa empresa' });
+    }
+
+    // Contar antes de borrar para devolver feedback
+    const { count: countAntes, error: countErr } = await supabase
+      .from('niko_conversaciones')
+      .select('id', { count: 'exact', head: true })
+      .eq('empresa_id', empresa_id);
+
+    if (countErr) {
+      console.error('[borrar-historial] Error contando:', countErr.message);
+    }
+
+    const { error: deleteErr } = await supabase
+      .from('niko_conversaciones')
+      .delete()
+      .eq('empresa_id', empresa_id);
+
+    if (deleteErr) {
+      console.error('[borrar-historial] Error eliminando:', deleteErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al eliminar historial' });
+    }
+
+    return res.json({
+      ok:            true,
+      deleted_count: countAntes ?? 0,
+    });
+
+  } catch (err) {
+    console.error('[borrar-historial] Error inesperado:', err.message);
     return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
   }
 });
