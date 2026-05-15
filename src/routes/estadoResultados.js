@@ -12,6 +12,7 @@ const supabase = createClient(
 const JERARQUIA_EERR = [
   { seccion: 'ingreso_principal',  label: 'Ingresos',              tipo: 'ingreso' },
   { seccion: 'ingreso_secundario', label: 'Otros ingresos',        tipo: 'ingreso' },
+  { seccion: 'otros_ingresos',     label: 'Sin categorizar',       tipo: 'ingreso' },
   { seccion: 'costo_directo',      label: 'Costos directos',       tipo: 'egreso'  },
   { seccion: 'gasto_operacional',  label: 'Gastos operacionales',  tipo: 'egreso'  },
   { seccion: 'gasto_marketing',    label: 'Marketing',             tipo: 'egreso'  },
@@ -66,24 +67,29 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
 
     if (errCat) throw errCat;
 
-    // 2. Obtener transacciones del período con categoria_id
+    // 2. Obtener TODAS las transacciones del período (con y sin categoria_id)
     const { data: transacciones, error: errTx } = await supabase
       .from('transacciones_historicas')
       .select('monto_original, tipo, categoria_id')
       .eq('empresa_id', empresa_id)
       .gte('fecha_transaccion', fechaDesde)
-      .lte('fecha_transaccion', fechaHasta)
-      .not('categoria_id', 'is', null);
+      .lte('fecha_transaccion', fechaHasta);
 
     if (errTx) throw errTx;
 
-    // 3. Sumar montos por categoria_id
+    // 3. Sumar montos por categoria_id; acumular sin categorizar separado por tipo
     const montosPorCategoria = {};
+    let sinCategorizarIngreso = 0;
+    let sinCategorizarEgreso  = 0;
+
     for (const tx of transacciones) {
-      if (!montosPorCategoria[tx.categoria_id]) {
-        montosPorCategoria[tx.categoria_id] = 0;
+      const monto = Math.abs(Number(tx.monto_original));
+      if (tx.categoria_id === null) {
+        if (tx.tipo === 'ingreso') sinCategorizarIngreso += monto;
+        else                       sinCategorizarEgreso  += monto;
+      } else {
+        montosPorCategoria[tx.categoria_id] = (montosPorCategoria[tx.categoria_id] || 0) + monto;
       }
-      montosPorCategoria[tx.categoria_id] += Math.abs(tx.monto_original);
     }
 
     // 4. Construir EERR con jerarquía
@@ -116,10 +122,33 @@ router.get('/:empresa_id', authMiddleware, async (req, res) => {
       secciones[seccion].total += monto;
     }
 
+    // Inyectar transacciones sin categorizar como ítem especial en su sección
+    if (sinCategorizarIngreso > 0) {
+      secciones['otros_ingresos'].categorias.push({
+        id:              null,
+        nombre:          'Sin categorizar',
+        monto:           sinCategorizarIngreso,
+        es_sistema:      false,
+        sin_categorizar: true,
+      });
+      secciones['otros_ingresos'].total += sinCategorizarIngreso;
+    }
+    if (sinCategorizarEgreso > 0) {
+      secciones['otros_egresos'].categorias.push({
+        id:              null,
+        nombre:          'Sin categorizar',
+        monto:           sinCategorizarEgreso,
+        es_sistema:      false,
+        sin_categorizar: true,
+      });
+      secciones['otros_egresos'].total += sinCategorizarEgreso;
+    }
+
     // 5. Calcular subtotales contables
     const totalIngresos =
-      (secciones.ingreso_principal?.total || 0) +
-      (secciones.ingreso_secundario?.total || 0);
+      (secciones.ingreso_principal?.total  || 0) +
+      (secciones.ingreso_secundario?.total || 0) +
+      (secciones.otros_ingresos?.total     || 0);
 
     const totalCostoDirecto = secciones.costo_directo?.total || 0;
     const margenBruto = totalIngresos - totalCostoDirecto;
