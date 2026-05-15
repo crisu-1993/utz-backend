@@ -12,7 +12,7 @@ const supabase = createClient(
 const JERARQUIA_EERR = [
   { seccion: 'ingreso_principal',  label: 'Ingresos',              tipo: 'ingreso' },
   { seccion: 'ingreso_secundario', label: 'Otros ingresos',        tipo: 'ingreso' },
-  { seccion: 'otros_ingresos',     label: 'Sin categorizar',       tipo: 'ingreso' },
+  { seccion: 'otros_ingresos',     label: 'Otros ingresos',        tipo: 'ingreso' },
   { seccion: 'costo_directo',      label: 'Costos directos',       tipo: 'egreso'  },
   { seccion: 'gasto_operacional',  label: 'Gastos operacionales',  tipo: 'egreso'  },
   { seccion: 'gasto_marketing',    label: 'Marketing',             tipo: 'egreso'  },
