@@ -7,6 +7,31 @@ const { obtenerContextoFinanciero }    = require('./contextoFinanciero');
 
 const MODEL = 'claude-sonnet-4-6';
 
+// ─── Plantillas de mensajes de Niko ante saturación ──────────────────────────
+// Se usan cuando Anthropic devuelve 529, 503, 502 o 504 (errores
+// transitorios). Niko responde "como si estuviera ocupado" en lugar
+// de mostrar error técnico al usuario.
+
+const PLANTILLAS_SATURACION = [
+  'Disculpa jefe, justo tuve una emergencia en la casa. ¿Hablamos en un rato?',
+  'Se me cayó el internet, jefe. Estoy intentando reconectarme. Vuelve a escribirme en unos minutos.',
+  'Jefe, justo salí un momento, no me puedo conectar bien ahora. Dame unos minutos y retomamos.',
+  'Estoy con un tema personal complicado en este momento, jefe. ¿Podemos retomar en un rato?',
+  'Estoy en un taco horrible, jefe, pero voy en camino. Dame unos minutos y nos conectamos.',
+  'Tuve que salir a hacer un trámite urgente, jefe. ¿Podemos retomar en un rato?',
+];
+
+const STATUS_SATURACION = new Set([529, 503, 502, 504]);
+
+function esErrorSaturacion(err) {
+  return err && typeof err.status === 'number' && STATUS_SATURACION.has(err.status);
+}
+
+function mensajeSaturacionAleatorio() {
+  const i = Math.floor(Math.random() * PLANTILLAS_SATURACION.length);
+  return PLANTILLAS_SATURACION[i];
+}
+
 // ─── Tool spec para Claude API ────────────────────────────────────────────────
 //
 // Niko dispone de esta tool para guardar reglas de categorización cuando el
@@ -196,16 +221,31 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
   // ── 6. Llamar a Claude (primera ronda, con tools) ────────────────────────
   const anthropic = new Anthropic();
 
-  let response = await anthropic.messages.create({
-    model:      MODEL,
-    max_tokens: 2000,
-    system:     systemPromptFinal,
-    tools:      NIKO_TOOLS,
-    messages:   [
-      ...(historial || []),
-      { role: 'user', content: mensaje },
-    ],
-  });
+  let response;
+  try {
+    response = await anthropic.messages.create({
+      model:      MODEL,
+      max_tokens: 2000,
+      system:     systemPromptFinal,
+      tools:      NIKO_TOOLS,
+      messages:   [
+        ...(historial || []),
+        { role: 'user', content: mensaje },
+      ],
+    });
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      console.warn(`[chatWithNiko] Saturación detectada (${err.status}). Devolviendo plantilla.`);
+      return {
+        respuesta:     mensajeSaturacionAleatorio(),
+        modelo_usado:  null,
+        tokens_usados: 0,
+        tools_usadas:  ['_saturacion'],
+        saturado:      true,
+      };
+    }
+    throw err;
+  }
 
   let totalInputTokens  = response.usage?.input_tokens  || 0;
   let totalOutputTokens = response.usage?.output_tokens || 0;
@@ -222,28 +262,45 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
       const toolResult = await ejecutarTool(toolUseBlock, empresa_id, user_id);
 
       // Segunda ronda SIN tools para evitar loops
-      response = await anthropic.messages.create({
-        model:      MODEL,
-        max_tokens: 2000,
-        system:     systemPromptFinal,
-        messages:   [
-          ...(historial || []),
-          { role: 'user',      content: mensaje },
-          { role: 'assistant', content: response.content },
-          {
-            role:    'user',
-            content: [
-              {
-                type:        'tool_result',
-                tool_use_id: toolUseBlock.id,
-                content:     toolResult.ok
-                  ? toolResult.mensaje
-                  : `Error: ${toolResult.mensaje}`,
-              },
-            ],
-          },
-        ],
-      });
+      let response2;
+      try {
+        response2 = await anthropic.messages.create({
+          model:      MODEL,
+          max_tokens: 2000,
+          system:     systemPromptFinal,
+          messages:   [
+            ...(historial || []),
+            { role: 'user',      content: mensaje },
+            { role: 'assistant', content: response.content },
+            {
+              role:    'user',
+              content: [
+                {
+                  type:        'tool_result',
+                  tool_use_id: toolUseBlock.id,
+                  content:     toolResult.ok
+                    ? toolResult.mensaje
+                    : `Error: ${toolResult.mensaje}`,
+                },
+              ],
+            },
+          ],
+        });
+      } catch (err) {
+        if (esErrorSaturacion(err)) {
+          console.warn(`[chatWithNiko] Saturación en segunda ronda (${err.status}).`);
+          return {
+            respuesta:     mensajeSaturacionAleatorio(),
+            modelo_usado:  response.model,
+            tokens_usados: totalInputTokens + totalOutputTokens,
+            tools_usadas:  [...toolsUsadas, '_saturacion'],
+            saturado:      true,
+          };
+        }
+        throw err;
+      }
+
+      response = response2;
 
       totalInputTokens  += response.usage?.input_tokens  || 0;
       totalOutputTokens += response.usage?.output_tokens || 0;
@@ -285,6 +342,7 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
     modelo_usado:  response.model,
     tokens_usados,
     tools_usadas:  toolsUsadas,
+    saturado:      false,
   };
 }
 
