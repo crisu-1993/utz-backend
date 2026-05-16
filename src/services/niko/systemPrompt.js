@@ -54,7 +54,39 @@ Hoy es {{FECHA_HOY_LARGA}}.
 Fecha en formato ISO: {{FECHA_HOY_ISO}}.
 Día de la semana: {{DIA_SEMANA}}.
 
-Usa SIEMPRE esta fecha como referencia para cualquier cálculo de fechas relativas (mañana, en 3 días, la próxima semana, el viernes, etc.). NUNCA uses fechas de tu memoria de entrenamiento — solo la fecha de hoy declarada acá.
+## Tabla de fechas relativas
+
+Usa SIEMPRE esta tabla para interpretar fechas relativas del usuario. NUNCA calcules tú las fechas — léelas acá. Esta tabla se actualiza automáticamente en cada conversación.
+
+Hoy ({{DIA_SEMANA}}): {{FECHA_HOY_ISO}}
+Mañana ({{MANANA_DIA}}): {{MANANA_ISO}}
+Pasado mañana ({{PASADO_MANANA_DIA}}): {{PASADO_MANANA_ISO}}
+
+Próximo lunes: {{PROXIMO_LUNES_ISO}}
+Próximo martes: {{PROXIMO_MARTES_ISO}}
+Próximo miércoles: {{PROXIMO_MIERCOLES_ISO}}
+Próximo jueves: {{PROXIMO_JUEVES_ISO}}
+Próximo viernes: {{PROXIMO_VIERNES_ISO}}
+Próximo sábado: {{PROXIMO_SABADO_ISO}}
+Próximo domingo: {{PROXIMO_DOMINGO_ISO}}
+
+En 3 días: {{EN_3_DIAS_ISO}} ({{EN_3_DIAS_DIA}})
+En 5 días: {{EN_5_DIAS_ISO}} ({{EN_5_DIAS_DIA}})
+En 7 días / en una semana: {{EN_7_DIAS_ISO}} ({{EN_7_DIAS_DIA}})
+En 14 días / en dos semanas: {{EN_14_DIAS_ISO}} ({{EN_14_DIAS_DIA}})
+En 30 días / en un mes: {{EN_30_DIAS_ISO}} ({{EN_30_DIAS_DIA}})
+
+Fin de este mes: {{FIN_DE_MES_ISO}} ({{FIN_DE_MES_DIA}})
+Inicio del próximo mes: {{INICIO_PROXIMO_MES_ISO}} ({{INICIO_PROXIMO_MES_DIA}})
+Fin del próximo mes: {{FIN_PROXIMO_MES_ISO}} ({{FIN_PROXIMO_MES_DIA}})
+
+## Regla crítica de uso
+
+Si el usuario menciona un día de la semana (lunes, martes, etc.) o una expresión temporal relativa, busca la entrada exacta en esta tabla. NUNCA calcules tú la fecha mentalmente.
+
+Si la expresión del usuario no coincide claramente con ninguna entrada (ej: "en 6 meses", "el 12 de abril del 2027", "el lunes siguiente al del próximo lunes"), pregunta al usuario que sea más específico o pídele la fecha exacta en formato día/mes/año.
+
+NUNCA uses fechas de tu memoria de entrenamiento — solo las fechas declaradas en esta tabla.
 
 ---
 
@@ -1058,26 +1090,121 @@ Haz tu mejor trabajo. Cada día.
 function buildSystemPrompt({ nombreCliente, rolCliente, nombreEmpresa, rubro, tratamiento, fechaActual }) {
   const fecha = fechaActual instanceof Date ? fechaActual : new Date();
 
-  // Formato largo: "sábado 16 de mayo de 2026" (sin coma, zona Chile)
+  // ── Nombres de días en español (índice = getUTCDay(), 0 = domingo) ───────────
+  const DIAS_ES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+
+  // ── Helpers de aritmética pura en UTC ────────────────────────────────────────
+  // Toda la aritmética opera sobre dates UTC construidas desde los componentes
+  // año/mes/día de la zona Santiago. Evita drift de DST por completo.
+
+  function addDays(d, n) {
+    return new Date(d.getTime() + n * 86400000);
+  }
+
+  // Formatea un Date UTC como "YYYY-MM-DD" sin depender de la timezone del servidor
+  function isoStr(d) {
+    const yy  = d.getUTCFullYear();
+    const mm  = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd  = String(d.getUTCDate()).padStart(2, '0');
+    return `${yy}-${mm}-${dd}`;
+  }
+
+  // Nombre del día de la semana en español
+  function diaNombre(d) {
+    return DIAS_ES[d.getUTCDay()];
+  }
+
+  // Próximo día de la semana (targetDow 0=dom … 6=sáb).
+  // Si hoy ya es ese día, devuelve hoy + 7 días (nunca devuelve hoy).
+  function proximoDow(hoyDate, targetDow) {
+    const dow  = hoyDate.getUTCDay();
+    let   diff = (targetDow - dow + 7) % 7;
+    if (diff === 0) diff = 7;
+    return addDays(hoyDate, diff);
+  }
+
+  // ── Fecha base: hoy en zona Santiago → componentes y/mo/d ───────────────────
+  // Usamos en-CA porque ese locale formatea como YYYY-MM-DD.
+  const todayISO = fecha.toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
+  const [y, mo, d] = todayISO.split('-').map(Number); // mo es 1-based
+
+  // Date UTC para aritmética: no hay riesgo de DST porque operamos en UTC puro.
+  const hoyDate = new Date(Date.UTC(y, mo - 1, d));
+
+  // ── Formato largo solo para hoy (necesita Intl para traducción del mes) ──────
   const fechaHoyLarga = fecha
     .toLocaleDateString('es-CL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Santiago' })
-    .replace(',', '');
+    .replace(',', ''); // "sábado 16 de mayo de 2026"
 
-  // Formato ISO: "2026-05-16" (locale en-CA devuelve YYYY-MM-DD)
-  const fechaHoyISO = fecha.toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
+  // ── Calcular todas las fechas de la tabla ────────────────────────────────────
+  const manana        = addDays(hoyDate, 1);
+  const pasadoManana  = addDays(hoyDate, 2);
 
-  // Día de semana solo: "sábado"
-  const diaSemana = fecha.toLocaleDateString('es-CL', { weekday: 'long', timeZone: 'America/Santiago' });
+  const proxLunes     = proximoDow(hoyDate, 1);
+  const proxMartes    = proximoDow(hoyDate, 2);
+  const proxMiercoles = proximoDow(hoyDate, 3);
+  const proxJueves    = proximoDow(hoyDate, 4);
+  const proxViernes   = proximoDow(hoyDate, 5);
+  const proxSabado    = proximoDow(hoyDate, 6);
+  const proxDomingo   = proximoDow(hoyDate, 0);
 
+  const en3dias  = addDays(hoyDate, 3);
+  const en5dias  = addDays(hoyDate, 5);
+  const en7dias  = addDays(hoyDate, 7);
+  const en14dias = addDays(hoyDate, 14);
+  const en30dias = addDays(hoyDate, 30);
+
+  // Fin de este mes: Date.UTC(y, mo, 0) → día 0 del mes siguiente en JS
+  // equivale al último día del mes actual (mo es 1-based, lo usamos como índice 0-based del siguiente).
+  const finDeMes = new Date(Date.UTC(y, mo, 0));
+
+  // Próximo mes: mo%12 da el índice 0-based del mes siguiente (maneja dic→ene).
+  const nextMo0       = mo % 12;          // 0-based: ej. mayo(5)%12=5=jun, dic(12)%12=0=ene
+  const nextY         = mo === 12 ? y + 1 : y;
+  const inicioProxMes = new Date(Date.UTC(nextY, nextMo0, 1));
+  // Fin del próximo mes: día 0 del mes después del próximo (nextMo0+1 puede ser 12, lo que JS resuelve solo).
+  const finProxMes    = new Date(Date.UTC(nextY, nextMo0 + 1, 0));
+
+  // ── Construir prompt reemplazando todos los placeholders ─────────────────────
   return SYSTEM_PROMPT_TEMPLATE
-    .replace(/\{\{NOMBRE_CLIENTE\}\}/g,   nombreCliente || 'Cliente')
-    .replace(/\{\{ROL_CLIENTE\}\}/g,      rolCliente    || 'dueño/a')
-    .replace(/\{\{NOMBRE_EMPRESA\}\}/g,   nombreEmpresa || 'la empresa')
-    .replace(/\{\{RUBRO\}\}/g,            rubro         || 'su rubro')
-    .replace(/\{\{TRATAMIENTO\}\}/g,      tratamiento   || 'tu')
-    .replace(/\{\{FECHA_HOY_LARGA\}\}/g,  fechaHoyLarga)
-    .replace(/\{\{FECHA_HOY_ISO\}\}/g,    fechaHoyISO)
-    .replace(/\{\{DIA_SEMANA\}\}/g,       diaSemana);
+    // Originales
+    .replace(/\{\{NOMBRE_CLIENTE\}\}/g,          nombreCliente || 'Cliente')
+    .replace(/\{\{ROL_CLIENTE\}\}/g,             rolCliente    || 'dueño/a')
+    .replace(/\{\{NOMBRE_EMPRESA\}\}/g,          nombreEmpresa || 'la empresa')
+    .replace(/\{\{RUBRO\}\}/g,                   rubro         || 'su rubro')
+    .replace(/\{\{TRATAMIENTO\}\}/g,             tratamiento   || 'tu')
+    // Hotfix fecha (hoy)
+    .replace(/\{\{FECHA_HOY_LARGA\}\}/g,         fechaHoyLarga)
+    .replace(/\{\{FECHA_HOY_ISO\}\}/g,           todayISO)
+    .replace(/\{\{DIA_SEMANA\}\}/g,              diaNombre(hoyDate))
+    // Tabla de fechas relativas
+    .replace(/\{\{MANANA_ISO\}\}/g,              isoStr(manana))
+    .replace(/\{\{MANANA_DIA\}\}/g,              diaNombre(manana))
+    .replace(/\{\{PASADO_MANANA_ISO\}\}/g,       isoStr(pasadoManana))
+    .replace(/\{\{PASADO_MANANA_DIA\}\}/g,       diaNombre(pasadoManana))
+    .replace(/\{\{PROXIMO_LUNES_ISO\}\}/g,       isoStr(proxLunes))
+    .replace(/\{\{PROXIMO_MARTES_ISO\}\}/g,      isoStr(proxMartes))
+    .replace(/\{\{PROXIMO_MIERCOLES_ISO\}\}/g,   isoStr(proxMiercoles))
+    .replace(/\{\{PROXIMO_JUEVES_ISO\}\}/g,      isoStr(proxJueves))
+    .replace(/\{\{PROXIMO_VIERNES_ISO\}\}/g,     isoStr(proxViernes))
+    .replace(/\{\{PROXIMO_SABADO_ISO\}\}/g,      isoStr(proxSabado))
+    .replace(/\{\{PROXIMO_DOMINGO_ISO\}\}/g,     isoStr(proxDomingo))
+    .replace(/\{\{EN_3_DIAS_ISO\}\}/g,           isoStr(en3dias))
+    .replace(/\{\{EN_3_DIAS_DIA\}\}/g,           diaNombre(en3dias))
+    .replace(/\{\{EN_5_DIAS_ISO\}\}/g,           isoStr(en5dias))
+    .replace(/\{\{EN_5_DIAS_DIA\}\}/g,           diaNombre(en5dias))
+    .replace(/\{\{EN_7_DIAS_ISO\}\}/g,           isoStr(en7dias))
+    .replace(/\{\{EN_7_DIAS_DIA\}\}/g,           diaNombre(en7dias))
+    .replace(/\{\{EN_14_DIAS_ISO\}\}/g,          isoStr(en14dias))
+    .replace(/\{\{EN_14_DIAS_DIA\}\}/g,          diaNombre(en14dias))
+    .replace(/\{\{EN_30_DIAS_ISO\}\}/g,          isoStr(en30dias))
+    .replace(/\{\{EN_30_DIAS_DIA\}\}/g,          diaNombre(en30dias))
+    .replace(/\{\{FIN_DE_MES_ISO\}\}/g,          isoStr(finDeMes))
+    .replace(/\{\{FIN_DE_MES_DIA\}\}/g,          diaNombre(finDeMes))
+    .replace(/\{\{INICIO_PROXIMO_MES_ISO\}\}/g,  isoStr(inicioProxMes))
+    .replace(/\{\{INICIO_PROXIMO_MES_DIA\}\}/g,  diaNombre(inicioProxMes))
+    .replace(/\{\{FIN_PROXIMO_MES_ISO\}\}/g,     isoStr(finProxMes))
+    .replace(/\{\{FIN_PROXIMO_MES_DIA\}\}/g,     diaNombre(finProxMes));
 }
 
 module.exports = { buildSystemPrompt, SYSTEM_PROMPT_TEMPLATE };
