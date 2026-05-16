@@ -11,7 +11,7 @@
 const express                    = require('express');
 const { createClient }           = require('@supabase/supabase-js');
 const { authMiddleware }         = require('../middleware/auth');
-const { chatWithNiko }           = require('../services/niko/nikoService');
+const { chatWithNikoStream }     = require('../services/niko/nikoService');
 const { detectarDiagnostico }    = require('./categorias');
 
 const supabase = createClient(
@@ -52,11 +52,19 @@ function plantillaRecordatorio(numero, datos) {
 // ─── POST /api/niko/chat ──────────────────────────────────────────────────────
 // Body: { mensaje: string, historial?: Array }
 // Requiere: Authorization: Bearer <token>
+// Respuesta: Server-Sent Events (text/event-stream)
+//
+// Eventos SSE emitidos:
+//   event: delta      → { texto: string }          (fragmento de texto de Niko)
+//   event: tool_start → { tool: string }            (Niko está ejecutando una tool)
+//   event: tool_end   → { tool: string, ok: bool }  (tool completada)
+//   event: done       → { eerr_ampliado_recien_revelado: bool } (respuesta completa)
+//   event: error      → { error: string }           (error catastrófico)
 router.post('/chat', authMiddleware, async (req, res) => {
   const { empresa_id, user_id } = req.auth;
   const { mensaje, historial: rawHistorial } = req.body || {};
 
-  // Validar mensaje
+  // ── Validaciones (JSON, antes de SSE headers) ──────────────────────────────
   if (!mensaje || !String(mensaje).trim()) {
     return res.status(400).json({
       ok:    false,
@@ -64,7 +72,6 @@ router.post('/chat', authMiddleware, async (req, res) => {
     });
   }
 
-  // Validar y normalizar historial
   let historial = [];
 
   if (rawHistorial !== undefined) {
@@ -101,78 +108,38 @@ router.post('/chat', authMiddleware, async (req, res) => {
     }));
   }
 
+  const mensajeTrimmed = String(mensaje).trim();
+
+  // ── Activar SSE ────────────────────────────────────────────────────────────
+  res.setHeader('Content-Type',      'text/event-stream');
+  res.setHeader('Cache-Control',     'no-cache, no-transform');
+  res.setHeader('Connection',        'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  // Helper: escribe un evento SSE
+  const emit = (eventName, dataObj) => {
+    res.write(`event: ${eventName}\ndata: ${JSON.stringify(dataObj)}\n\n`);
+  };
+
+  // Persistir mensaje del usuario (fire-and-forget)
+  supabase.from('niko_conversaciones').insert({
+    empresa_id,
+    user_id,
+    rol:             'user',
+    mensaje:         mensajeTrimmed,
+    tools_invocadas: [],
+  }).then(({ error }) => {
+    if (error) console.error('[niko/chat] Error persistiendo mensaje user:', error.message);
+  });
+
   try {
-    const inicio         = Date.now();
-    const mensajeTrimmed = String(mensaje).trim();
-
-    // Persistir mensaje del usuario (fire-and-forget: no bloquea si falla)
-    supabase.from('niko_conversaciones').insert({
-      empresa_id,
-      user_id,
-      rol:             'user',
-      mensaje:         mensajeTrimmed,
-      tools_invocadas: [],
-    }).then(({ error }) => {
-      if (error) console.error('[niko/chat] Error persistiendo mensaje user:', error.message);
-    });
-
-    const { respuesta, modelo_usado, tokens_usados, tools_usadas } = await chatWithNiko(
-      empresa_id,
-      mensajeTrimmed,
-      historial,
-      user_id
-    );
-
-    const latencia_ms = Date.now() - inicio;
-
-    // Persistir respuesta del assistant (fire-and-forget: no bloquea si falla)
-    supabase.from('niko_conversaciones').insert({
-      empresa_id,
-      user_id,
-      rol:             'assistant',
-      mensaje:         respuesta,
-      tools_invocadas: tools_usadas || [],
-      tokens_usados,
-      modelo_usado,
-      latencia_ms,
-    }).then(({ error }) => {
-      if (error) console.error('[niko/chat] Error persistiendo respuesta assistant:', error.message);
-    });
-
-    // ── Verificar si Niko debe notificar EERR Ampliado ──
-    let eerrAmpliado = false;
-
-    const { data: empresaFlags } = await supabase
-      .from('empresas')
-      .select('eerr_ampliado_revelado, eerr_ampliado_niko_notificado')
-      .eq('id', empresa_id)
-      .single();
-
-    if (
-      empresaFlags?.eerr_ampliado_revelado &&
-      !empresaFlags?.eerr_ampliado_niko_notificado
-    ) {
-      await supabase
-        .from('empresas')
-        .update({ eerr_ampliado_niko_notificado: true })
-        .eq('id', empresa_id);
-
-      eerrAmpliado = true;
-    }
-
-    return res.json({
-      ok: true,
-      respuesta,
-      eerr_ampliado_recien_revelado: eerrAmpliado,
-      meta: { modelo_usado, tokens_usados },
-    });
-
+    await chatWithNikoStream({ mensaje: mensajeTrimmed, historial, empresa_id, user_id }, emit);
   } catch (err) {
-    console.error('[niko] Error en POST /chat:', err.message);
-    return res.status(500).json({
-      ok:    false,
-      error: err.message || 'Error interno al procesar el mensaje',
-    });
+    console.error('[niko] Error catastrófico en POST /chat:', err.message);
+    emit('error', { error: err.message || 'Error interno al procesar el mensaje' });
+  } finally {
+    res.end();
   }
 });
 

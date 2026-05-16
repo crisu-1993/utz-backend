@@ -406,6 +406,271 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
   };
 }
 
+// ─── chatWithNikoStream ────────────────────────────────────────────────────────
+//
+// Versión streaming de chatWithNiko. En lugar de devolver un objeto,
+// emite eventos SSE a medida que Claude genera tokens.
+//
+// @param {object} params   - { mensaje, historial, empresa_id, user_id }
+// @param {Function} emit   - emit(eventName, dataObj) → escribe al SSE stream
+//
+// Eventos emitidos (en orden):
+//   delta      → { texto: string }          — chunk de texto de Claude
+//   tool_start → { tool, input }            — Claude quiere usar una tool
+//   tool_end   → { ok, mensaje }            — tool ejecutada
+//   done       → { respuesta, eerr_ampliado_recien_revelado, meta, saturado }
+//   (en saturación: delta con plantilla + done con saturado:true)
+
+async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, emit) {
+  const inicio    = Date.now();
+  const supabase  = getSupabase();
+
+  // ── 1. Cargar datos de la empresa ─────────────────────────────────────────
+  const { data, error } = await supabase
+    .from('empresas')
+    .select('nombre, giro, representante_nombre, representante_rol, tratamiento')
+    .eq('id', empresa_id)
+    .maybeSingle();
+
+  if (error) {
+    console.error(`[chatWithNikoStream] Error query empresa ${empresa_id}:`, error.message);
+    throw new Error('No se pudieron cargar los datos de la empresa');
+  }
+  if (!data) {
+    console.error(`[chatWithNikoStream] Empresa no encontrada: ${empresa_id}`);
+    throw new Error('Empresa no encontrada');
+  }
+
+  // ── 2. Mapear datos con fallbacks seguros ─────────────────────────────────
+  const nombreEmpresa = data.nombre               || 'tu empresa';
+  const rubro         = data.giro                 || 'su rubro';
+  const nombreCliente = data.representante_nombre || 'cliente';
+  const rolCliente    = data.representante_rol    || 'dueño/a';
+  const tratamiento   = data.tratamiento          || 'tu';
+
+  // ── 3. Obtener contexto financiero ────────────────────────────────────────
+  let contextoFinanciero = null;
+  try {
+    contextoFinanciero = await obtenerContextoFinanciero(empresa_id);
+  } catch (errCtx) {
+    console.error('[chatWithNikoStream] Error cargando contexto financiero:', errCtx.message);
+  }
+
+  // ── 4-5. Construir system prompt ──────────────────────────────────────────
+  const systemPromptBase = buildSystemPrompt({
+    nombreCliente,
+    rolCliente,
+    nombreEmpresa,
+    rubro,
+    tratamiento,
+  });
+
+  const tieneContexto = contextoFinanciero && (
+    contextoFinanciero.resumenes_por_mes?.length > 0        ||
+    contextoFinanciero.datos_manuales?.length > 0           ||
+    contextoFinanciero.patrones_pendientes?.length > 0      ||
+    contextoFinanciero.reglas_activas?.length > 0           ||
+    contextoFinanciero.es_primera_sesion === true
+  );
+  const systemPromptFinal = tieneContexto
+    ? systemPromptBase + '\n\n## CONTEXTO FINANCIERO ACTUAL\n\n' + formatearContexto(contextoFinanciero)
+    : systemPromptBase;
+
+  const anthropic = new Anthropic();
+
+  let textoRonda1   = '';
+  let textoRonda2   = '';
+  let finalMsg1     = null;
+  let modeloUsado   = MODEL;
+  let totalInput    = 0;
+  let totalOutput   = 0;
+  const toolsUsadas = [];
+
+  // Helper interno: persistir assistant + emitir done, luego retornar
+  const persistirYTerminar = ({ respuesta, eerrAmpliado, saturado }) => {
+    const tokens_usados = totalInput + totalOutput;
+    const latencia_ms   = Date.now() - inicio;
+
+    emit('done', {
+      respuesta,
+      eerr_ampliado_recien_revelado: eerrAmpliado,
+      meta: { modelo_usado: modeloUsado, tokens_usados, tools_usadas: toolsUsadas },
+      saturado,
+    });
+
+    // Fire-and-forget: persistir respuesta del assistant
+    supabase.from('niko_conversaciones').insert({
+      empresa_id,
+      user_id,
+      rol:             'assistant',
+      mensaje:         respuesta,
+      tools_invocadas: toolsUsadas,
+      tokens_usados,
+      modelo_usado:    modeloUsado,
+      latencia_ms,
+    }).then(({ error: e }) => {
+      if (e) console.error('[chatWithNikoStream] Error persistiendo assistant:', e.message);
+    });
+  };
+
+  // ── 6. RONDA 1: stream con tools ─────────────────────────────────────────
+  try {
+    const stream1 = anthropic.messages.stream({
+      model:      MODEL,
+      max_tokens: 2000,
+      system:     systemPromptFinal,
+      tools:      NIKO_TOOLS,
+      messages:   [
+        ...(historial || []),
+        { role: 'user', content: mensaje },
+      ],
+    });
+
+    for await (const event of stream1) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        const chunk = event.delta.text;
+        textoRonda1 += chunk;
+        emit('delta', { texto: chunk });
+      }
+    }
+
+    // finalMessage() ensamblada por el SDK: incluye tool_use con input completo
+    finalMsg1    = await stream1.finalMessage();
+    modeloUsado  = finalMsg1.model || MODEL;
+    totalInput  += finalMsg1.usage?.input_tokens  || 0;
+    totalOutput += finalMsg1.usage?.output_tokens || 0;
+
+    console.log('[chatWithNikoStream] Ronda 1 completa. stop_reason:', finalMsg1.stop_reason,
+      '| tokens ronda 1:', (finalMsg1.usage?.input_tokens || 0) + (finalMsg1.usage?.output_tokens || 0));
+
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      console.warn(`[chatWithNikoStream] Saturación ronda 1 (${err.status}).`);
+      const textoSat = mensajeSaturacionAleatorio();
+      toolsUsadas.push('_saturacion');
+      emit('delta', { texto: textoSat });
+      persistirYTerminar({ respuesta: textoSat, eerrAmpliado: false, saturado: true });
+      return;
+    }
+    throw err;
+  }
+
+  // ── 7. Tool calling si Claude lo pidió ───────────────────────────────────
+  if (finalMsg1.stop_reason === 'tool_use') {
+    // El SDK ensambla el bloque tool_use completo (con input parseado) en finalMessage()
+    const toolUseBlock = finalMsg1.content.find(b => b.type === 'tool_use');
+
+    if (toolUseBlock) {
+      console.log('[chatWithNikoStream] Claude pidió tool:', toolUseBlock.name, '| id:', toolUseBlock.id);
+      toolsUsadas.push(toolUseBlock.name);
+
+      emit('tool_start', { tool: toolUseBlock.name, input: toolUseBlock.input });
+
+      const toolResult = await ejecutarTool(toolUseBlock, empresa_id, user_id);
+
+      emit('tool_end', { ok: toolResult.ok, mensaje: toolResult.mensaje });
+
+      // ── RONDA 2: stream sin tools, con tool_result ────────────────────────
+      try {
+        const stream2 = anthropic.messages.stream({
+          model:      MODEL,
+          max_tokens: 2000,
+          system:     systemPromptFinal,
+          messages:   [
+            ...(historial || []),
+            { role: 'user',      content: mensaje },
+            { role: 'assistant', content: finalMsg1.content },  // content completo de ronda 1
+            {
+              role:    'user',
+              content: [
+                {
+                  type:        'tool_result',
+                  tool_use_id: toolUseBlock.id,
+                  content:     toolResult.ok
+                    ? toolResult.mensaje
+                    : `Error: ${toolResult.mensaje}`,
+                },
+              ],
+            },
+          ],
+          // Sin tools: evita loops
+        });
+
+        for await (const event of stream2) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            const chunk = event.delta.text;
+            textoRonda2 += chunk;
+            emit('delta', { texto: chunk });
+          }
+        }
+
+        const finalMsg2  = await stream2.finalMessage();
+        modeloUsado  = finalMsg2.model || modeloUsado;
+        totalInput  += finalMsg2.usage?.input_tokens  || 0;
+        totalOutput += finalMsg2.usage?.output_tokens || 0;
+
+        console.log('[chatWithNikoStream] Ronda 2 completa. tokens acumulados:', totalInput + totalOutput);
+
+      } catch (err) {
+        if (esErrorSaturacion(err)) {
+          console.warn(`[chatWithNikoStream] Saturación ronda 2 (${err.status}).`);
+          const textoSat = mensajeSaturacionAleatorio();
+          toolsUsadas.push('_saturacion');
+          emit('delta', { texto: textoSat });
+          textoRonda2 = textoSat;
+          const respSat = (textoRonda1 + textoRonda2).trim();
+          persistirYTerminar({ respuesta: respSat, eerrAmpliado: false, saturado: true });
+          return;
+        }
+        throw err;
+      }
+    }
+  }
+
+  // ── 8. Marcar primera sesión completada si corresponde ───────────────────
+  if (contextoFinanciero?.es_primera_sesion === true) {
+    const { error: updateError } = await supabase
+      .from('empresas')
+      .update({ primera_conversacion_niko_completada: true })
+      .eq('id', empresa_id)
+      .eq('primera_conversacion_niko_completada', false);
+
+    if (updateError) {
+      console.warn('[chatWithNikoStream] No se pudo marcar primera sesión completada:', updateError.message);
+    } else {
+      console.log('[chatWithNikoStream] Primera sesión marcada como completada para empresa:', empresa_id);
+    }
+  }
+
+  // ── 9. Verificar flag EERR Ampliado ──────────────────────────────────────
+  let eerrAmpliado = false;
+  const { data: empresaFlags } = await supabase
+    .from('empresas')
+    .select('eerr_ampliado_revelado, eerr_ampliado_niko_notificado')
+    .eq('id', empresa_id)
+    .single();
+
+  if (empresaFlags?.eerr_ampliado_revelado && !empresaFlags?.eerr_ampliado_niko_notificado) {
+    await supabase
+      .from('empresas')
+      .update({ eerr_ampliado_niko_notificado: true })
+      .eq('id', empresa_id);
+    eerrAmpliado = true;
+  }
+
+  // ── 10. Armar respuesta completa y emitir done ───────────────────────────
+  let respuestaCompleta = (textoRonda1 + textoRonda2).trim();
+
+  if (!respuestaCompleta) {
+    console.warn('[chatWithNikoStream] Respuesta vacía de Claude, usando fallback');
+    const fallback = 'Disculpa, hubo un problema. ¿Puedes repetir tu pregunta?';
+    emit('delta', { texto: fallback });
+    respuestaCompleta = fallback;
+  }
+
+  persistirYTerminar({ respuesta: respuestaCompleta, eerrAmpliado, saturado: false });
+}
+
 // ─── Formatear contexto financiero como texto para el system prompt ──────────
 
 function formatearContexto(contexto) {
@@ -501,4 +766,4 @@ ${topLines}`;
   return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}${bloqueEstado}`;
 }
 
-module.exports = { chatWithNiko };
+module.exports = { chatWithNiko, chatWithNikoStream };
