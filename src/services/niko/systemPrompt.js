@@ -53,6 +53,7 @@ Eres un empleado A+: motivado, profesional, comprometido con el éxito del negoc
 Hoy es {{FECHA_HOY_LARGA}}.
 Fecha en formato ISO: {{FECHA_HOY_ISO}}.
 Día de la semana: {{DIA_SEMANA}}.
+Hora actual en Chile: {{HORA_CHILE}} ({{MOMENTO_DEL_DIA}}).
 
 ## Tabla de fechas relativas
 
@@ -1185,7 +1186,28 @@ function buildSystemPrompt({ nombreCliente, rolCliente, nombreEmpresa, rubro, tr
   // Fin del próximo mes: día 0 del mes después del próximo (nextMo0+1 puede ser 12, lo que JS resuelve solo).
   const finProxMes    = new Date(Date.UTC(nextY, nextMo0 + 1, 0));
 
-  // ── Construir prompt reemplazando todos los placeholders ─────────────────────
+  // ── Hora actual en Chile ────────────────────────────────────────────
+  const horaChile = fecha.toLocaleTimeString('es-CL', {
+    timeZone: 'America/Santiago',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+
+  // Derivar momento del día desde hora numérica
+  const horaNum = parseInt(fecha.toLocaleString('en-US', {
+    timeZone: 'America/Santiago',
+    hour: 'numeric',
+    hour12: false,
+  }), 10);
+
+  let momentoDelDia;
+  if      (horaNum >= 5  && horaNum < 12) momentoDelDia = 'mañana';
+  else if (horaNum >= 12 && horaNum < 19) momentoDelDia = 'tarde';
+  else if (horaNum >= 19 && horaNum < 23) momentoDelDia = 'noche';
+  else                                    momentoDelDia = 'madrugada';
+
+    // ── Construir prompt reemplazando todos los placeholders ─────────────────────
   return SYSTEM_PROMPT_TEMPLATE
     // Originales
     .replace(/\{\{NOMBRE_CLIENTE\}\}/g,          nombreCliente || 'Cliente')
@@ -1242,7 +1264,9 @@ function buildSystemPrompt({ nombreCliente, rolCliente, nombreEmpresa, rubro, tr
     .replace(/\{\{INICIO_PROXIMO_MES_DIA\}\}/g,   diaNombre(inicioProxMes))
     .replace(/\{\{FIN_PROXIMO_MES_ISO\}\}/g,      isoStr(finProxMes))
     .replace(/\{\{FIN_PROXIMO_MES_CL\}\}/g,       clStr(finProxMes))
-    .replace(/\{\{FIN_PROXIMO_MES_DIA\}\}/g,      diaNombre(finProxMes));
+    .replace(/\{\{FIN_PROXIMO_MES_DIA\}\}/g,      diaNombre(finProxMes))
+    .replace(/\{\{HORA_CHILE\}\}/g,             horaChile)
+    .replace(/\{\{MOMENTO_DEL_DIA\}\}/g,         momentoDelDia);
 }
 
 module.exports = { buildSystemPrompt, SYSTEM_PROMPT_TEMPLATE };
