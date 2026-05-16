@@ -48,6 +48,16 @@ Eres un empleado A+: motivado, profesional, comprometido con el éxito del negoc
 
 ---
 
+# CONTEXTO TEMPORAL
+
+Hoy es {{FECHA_HOY_LARGA}}.
+Fecha en formato ISO: {{FECHA_HOY_ISO}}.
+Día de la semana: {{DIA_SEMANA}}.
+
+Usa SIEMPRE esta fecha como referencia para cualquier cálculo de fechas relativas (mañana, en 3 días, la próxima semana, el viernes, etc.). NUNCA uses fechas de tu memoria de entrenamiento — solo la fecha de hoy declarada acá.
+
+---
+
 # PERSONALIDAD Y TONO
 
 ## Personalidad core:
@@ -1045,13 +1055,29 @@ Haz tu mejor trabajo. Cada día.
 
 // ─── Función para construir el system prompt ──────────────────────────────────
 
-function buildSystemPrompt({ nombreCliente, rolCliente, nombreEmpresa, rubro, tratamiento }) {
+function buildSystemPrompt({ nombreCliente, rolCliente, nombreEmpresa, rubro, tratamiento, fechaActual }) {
+  const fecha = fechaActual instanceof Date ? fechaActual : new Date();
+
+  // Formato largo: "sábado 16 de mayo de 2026" (sin coma, zona Chile)
+  const fechaHoyLarga = fecha
+    .toLocaleDateString('es-CL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Santiago' })
+    .replace(',', '');
+
+  // Formato ISO: "2026-05-16" (locale en-CA devuelve YYYY-MM-DD)
+  const fechaHoyISO = fecha.toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
+
+  // Día de semana solo: "sábado"
+  const diaSemana = fecha.toLocaleDateString('es-CL', { weekday: 'long', timeZone: 'America/Santiago' });
+
   return SYSTEM_PROMPT_TEMPLATE
-    .replace(/\{\{NOMBRE_CLIENTE\}\}/g, nombreCliente || 'Cliente')
-    .replace(/\{\{ROL_CLIENTE\}\}/g, rolCliente || 'dueño/a')
-    .replace(/\{\{NOMBRE_EMPRESA\}\}/g, nombreEmpresa || 'la empresa')
-    .replace(/\{\{RUBRO\}\}/g, rubro || 'su rubro')
-    .replace(/\{\{TRATAMIENTO\}\}/g, tratamiento || 'tu');
+    .replace(/\{\{NOMBRE_CLIENTE\}\}/g,   nombreCliente || 'Cliente')
+    .replace(/\{\{ROL_CLIENTE\}\}/g,      rolCliente    || 'dueño/a')
+    .replace(/\{\{NOMBRE_EMPRESA\}\}/g,   nombreEmpresa || 'la empresa')
+    .replace(/\{\{RUBRO\}\}/g,            rubro         || 'su rubro')
+    .replace(/\{\{TRATAMIENTO\}\}/g,      tratamiento   || 'tu')
+    .replace(/\{\{FECHA_HOY_LARGA\}\}/g,  fechaHoyLarga)
+    .replace(/\{\{FECHA_HOY_ISO\}\}/g,    fechaHoyISO)
+    .replace(/\{\{DIA_SEMANA\}\}/g,       diaSemana);
 }
 
 module.exports = { buildSystemPrompt, SYSTEM_PROMPT_TEMPLATE };
