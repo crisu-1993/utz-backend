@@ -99,11 +99,36 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
 
   const supabase = getSupabase();
 
+  // Calcular titulo limpio una vez (reutilizado abajo)
+  const tituloLimpio = String(titulo).trim();
+
   try {
+    // ── Anti-duplicados (solo para niko_a_pedido) ─────────────────────────
+    if (origenFinal === 'niko_a_pedido') {
+      const sesentaSegundosAtras = new Date(Date.now() - 60000).toISOString();
+
+      const { data: existente, error: errExistente } = await supabase
+        .from('recordatorios')
+        .select('*')
+        .eq('empresa_id', empresa_id)
+        .eq('titulo', tituloLimpio)
+        .eq('fecha_vencimiento', fecha_vencimiento || null)
+        .eq('origen', origenFinal)
+        .gte('created_at', sesentaSegundosAtras)
+        .maybeSingle();
+
+      if (errExistente) {
+        console.warn('[crearRecordatorio] Error verificando duplicado, continuando:', errExistente.message);
+      } else if (existente) {
+        console.warn('[crearRecordatorio] Duplicado detectado, devolviendo existente:', { empresa_id, titulo: tituloLimpio, fecha_vencimiento });
+        return { ok: true, recordatorio: existente };
+      }
+    }
+
     const payload = {
       empresa_id,
       user_id,
-      titulo:            String(titulo).trim(),
+      titulo:            tituloLimpio,
       descripcion:       descripcion ? String(descripcion).trim() : null,
       fecha_vencimiento: fecha_vencimiento || null,
       origen:            origenFinal,
