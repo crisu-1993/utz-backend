@@ -286,7 +286,7 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
     response = await anthropic.messages.create({
       model:      MODEL,
       max_tokens: 2000,
-      system:     systemPromptFinal,
+      system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
       tools:      NIKO_TOOLS,
       messages:   [
         ...(historial || []),
@@ -327,7 +327,7 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
         response2 = await anthropic.messages.create({
           model:      MODEL,
           max_tokens: 2000,
-          system:     systemPromptFinal,
+          system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
           messages:   [
             ...(historial || []),
             { role: 'user',      content: mensaje },
@@ -518,7 +518,7 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
     const stream1 = anthropic.messages.stream({
       model:      MODEL,
       max_tokens: 2000,
-      system:     systemPromptFinal,
+      system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
       tools:      NIKO_TOOLS,
       messages:   [
         ...(historial || []),
@@ -542,6 +542,12 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
 
     console.log('[chatWithNikoStream] Ronda 1 completa. stop_reason:', finalMsg1.stop_reason,
       '| tokens ronda 1:', (finalMsg1.usage?.input_tokens || 0) + (finalMsg1.usage?.output_tokens || 0));
+    console.log('[chatWithNikoStream] Cache R1:', {
+      cache_creation: finalMsg1.usage?.cache_creation_input_tokens || 0,
+      cache_read:     finalMsg1.usage?.cache_read_input_tokens     || 0,
+      input_normal:   finalMsg1.usage?.input_tokens                || 0,
+      output:         finalMsg1.usage?.output_tokens               || 0,
+    });
 
   } catch (err) {
     if (esErrorSaturacion(err)) {
@@ -575,7 +581,7 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
         const stream2 = anthropic.messages.stream({
           model:      MODEL,
           max_tokens: 2000,
-          system:     systemPromptFinal,
+          system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
           messages:   [
             ...(historial || []),
             { role: 'user',      content: mensaje },
@@ -610,6 +616,12 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
         totalOutput += finalMsg2.usage?.output_tokens || 0;
 
         console.log('[chatWithNikoStream] Ronda 2 completa. tokens acumulados:', totalInput + totalOutput);
+        console.log('[chatWithNikoStream] Cache R2:', {
+          cache_creation: finalMsg2.usage?.cache_creation_input_tokens || 0,
+          cache_read:     finalMsg2.usage?.cache_read_input_tokens     || 0,
+          input_normal:   finalMsg2.usage?.input_tokens                || 0,
+          output:         finalMsg2.usage?.output_tokens               || 0,
+        });
 
       } catch (err) {
         if (esErrorSaturacion(err)) {
