@@ -64,22 +64,37 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── POST /api/recordatorios ──────────────────────────────────────────────────
-// Body: { titulo, descripcion?, fecha_vencimiento? }
-router.post('/', authMiddleware, async (req, res) => {
-  const { empresa_id, user_id } = req.auth;
-  const { titulo, descripcion, fecha_vencimiento } = req.body || {};
+// ─── crearRecordatorio ────────────────────────────────────────────────────────
+//
+// Función pura: valida y crea un recordatorio en la tabla 'recordatorios'.
+// Usada internamente por el endpoint POST y por la tool de Niko.
+//
+// @param {object} params
+//   empresa_id        {string}  UUID de la empresa
+//   user_id           {string}  UUID del usuario
+//   titulo            {string}  Texto del recordatorio (requerido, max 200 chars)
+//   descripcion       {string?} Detalle adicional (opcional)
+//   fecha_vencimiento {string?} Fecha en formato YYYY-MM-DD (opcional)
+//   origen            {string?} 'manual' (default) | 'niko_a_pedido'
+// @returns {object} { ok: true, recordatorio } | { ok: false, mensaje, status }
+
+async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fecha_vencimiento, origen }) {
+  const origenFinal = origen ?? 'manual';
 
   if (!titulo || !String(titulo).trim()) {
-    return res.status(400).json({ ok: false, error: 'El campo "titulo" es requerido' });
+    return { ok: false, mensaje: 'El campo "titulo" es requerido', status: 400 };
   }
 
   if (String(titulo).trim().length > 200) {
-    return res.status(400).json({ ok: false, error: 'El título no puede superar 200 caracteres' });
+    return { ok: false, mensaje: 'El título no puede superar 200 caracteres', status: 400 };
   }
 
   if (fecha_vencimiento && !/^\d{4}-\d{2}-\d{2}$/.test(fecha_vencimiento)) {
-    return res.status(400).json({ ok: false, error: 'fecha_vencimiento debe tener formato YYYY-MM-DD' });
+    return { ok: false, mensaje: 'fecha_vencimiento debe tener formato YYYY-MM-DD', status: 400 };
+  }
+
+  if (!['manual', 'niko_a_pedido'].includes(origenFinal)) {
+    return { ok: false, mensaje: 'origen debe ser "manual" o "niko_a_pedido"', status: 400 };
   }
 
   const supabase = getSupabase();
@@ -91,6 +106,7 @@ router.post('/', authMiddleware, async (req, res) => {
       titulo:            String(titulo).trim(),
       descripcion:       descripcion ? String(descripcion).trim() : null,
       fecha_vencimiento: fecha_vencimiento || null,
+      origen:            origenFinal,
     };
 
     const { data, error } = await supabase
@@ -101,12 +117,34 @@ router.post('/', authMiddleware, async (req, res) => {
 
     if (error) throw new Error(error.message);
 
-    return res.status(201).json({ ok: true, recordatorio: data });
+    return { ok: true, recordatorio: data };
 
   } catch (err) {
-    console.error('[recordatorios] Error en POST /', err.message);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error('[recordatorios] Error en crearRecordatorio:', err.message);
+    return { ok: false, mensaje: err.message, status: 500 };
   }
+}
+
+// ─── POST /api/recordatorios ──────────────────────────────────────────────────
+// Body: { titulo, descripcion?, fecha_vencimiento? }
+router.post('/', authMiddleware, async (req, res) => {
+  const { empresa_id, user_id } = req.auth;
+  const { titulo, descripcion, fecha_vencimiento } = req.body || {};
+
+  const resultado = await crearRecordatorio({
+    empresa_id,
+    user_id,
+    titulo,
+    descripcion,
+    fecha_vencimiento,
+    origen: 'manual',
+  });
+
+  if (!resultado.ok) {
+    return res.status(resultado.status || 500).json({ ok: false, error: resultado.mensaje });
+  }
+
+  return res.status(201).json({ ok: true, recordatorio: resultado.recordatorio });
 });
 
 // ─── PATCH /api/recordatorios/:id ────────────────────────────────────────────
@@ -217,4 +255,5 @@ router.delete('/:id', authMiddleware, async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports                    = router;
+module.exports.crearRecordatorio  = crearRecordatorio;

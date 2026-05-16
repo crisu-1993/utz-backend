@@ -79,6 +79,28 @@ const NIKO_TOOLS = [
       required: ['patron', 'categoria_nombre', 'tipo_patron'],
     },
   },
+  {
+    name: 'crear_recordatorio',
+    description: "Crea un recordatorio en la pestaña 'Creados por mí' del usuario. Llama esta tool ÚNICAMENTE cuando el usuario te pide explícitamente que le recuerdes algo Y ya tienes la fecha exacta confirmada (formato YYYY-MM-DD). NO llames la tool si falta la fecha o si la fecha es relativa sin confirmar (ej: 'en 3 días', 'la próxima semana'). En esos casos primero calcula la fecha absoluta y confirma con el usuario antes de llamar la tool.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        titulo: {
+          type: 'string',
+          description: 'Texto corto que resume el recordatorio. Máximo 200 caracteres. Ejemplo: "Pagar IVA" o "Revisar ventas del mes".',
+        },
+        descripcion: {
+          type: 'string',
+          description: 'Detalle adicional opcional del recordatorio. Solo úsalo si el usuario dio contexto extra.',
+        },
+        fecha_vencimiento: {
+          type: 'string',
+          description: 'Fecha en formato YYYY-MM-DD. OBLIGATORIA. Si el usuario no la dio o es relativa, NO llames la tool todavía — pregunta o confirma primero.',
+        },
+      },
+      required: ['titulo', 'fecha_vencimiento'],
+    },
+  },
 ];
 
 function getSupabase() {
@@ -142,6 +164,44 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
         ok:      false,
         mensaje: `Error al guardar regla: ${resultado.error}`,
         codigo:  resultado.codigo,
+      };
+    }
+  }
+
+  if (name === 'crear_recordatorio') {
+    const { crearRecordatorio } = require('../../routes/recordatorios');
+
+    console.log('[ejecutarTool] Creando recordatorio:', {
+      tool_use_id,
+      empresa_id,
+      user_id,
+      titulo:            input.titulo,
+      fecha_vencimiento: input.fecha_vencimiento,
+    });
+
+    const resultado = await crearRecordatorio({
+      empresa_id,
+      user_id,
+      titulo:            input.titulo,
+      descripcion:       input.descripcion || null,
+      fecha_vencimiento: input.fecha_vencimiento,
+      origen:            'niko_a_pedido',   // hardcodeado — nunca del input de Claude
+    });
+
+    if (resultado.ok) {
+      return {
+        ok:      true,
+        mensaje: `Recordatorio creado para el ${resultado.recordatorio.fecha_vencimiento}: ${resultado.recordatorio.titulo}`,
+        datos: {
+          recordatorio_id:   resultado.recordatorio.id,
+          titulo:            resultado.recordatorio.titulo,
+          fecha_vencimiento: resultado.recordatorio.fecha_vencimiento,
+        },
+      };
+    } else {
+      return {
+        ok:      false,
+        mensaje: `Error al crear recordatorio: ${resultado.mensaje}`,
       };
     }
   }
