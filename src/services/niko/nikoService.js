@@ -95,7 +95,7 @@ const NIKO_TOOLS = [
         },
         fecha_vencimiento: {
           type: 'string',
-          description: 'Fecha en formato YYYY-MM-DD. OBLIGATORIA. Si el usuario no la dio o es relativa, NO llames la tool todavía — pregunta o confirma primero.',
+          description: 'Fecha en formato ISO YYYY-MM-DD (ej: "2026-05-18"). OBLIGATORIA. NUNCA uses formato chileno DD/MM/AAAA en este campo, solo ISO. Si el usuario no dio fecha o es relativa, NO llames la tool todavía — pregunta o confirma primero.',
         },
       },
       required: ['titulo', 'fecha_vencimiento'],

@@ -58,31 +58,39 @@ Día de la semana: {{DIA_SEMANA}}.
 
 Usa SIEMPRE esta tabla para interpretar fechas relativas del usuario. NUNCA calcules tú las fechas — léelas acá. Esta tabla se actualiza automáticamente en cada conversación.
 
-Hoy ({{DIA_SEMANA}}): {{FECHA_HOY_ISO}}
-Mañana ({{MANANA_DIA}}): {{MANANA_ISO}}
-Pasado mañana ({{PASADO_MANANA_DIA}}): {{PASADO_MANANA_ISO}}
+Cada entrada tiene dos formatos:
+- ISO YYYY-MM-DD (uso INTERNO, para llamar la tool crear_recordatorio)
+- Chileno DD/MM/AAAA (uso CONVERSACIONAL, para hablarle al usuario)
 
-Próximo lunes: {{PROXIMO_LUNES_ISO}}
-Próximo martes: {{PROXIMO_MARTES_ISO}}
-Próximo miércoles: {{PROXIMO_MIERCOLES_ISO}}
-Próximo jueves: {{PROXIMO_JUEVES_ISO}}
-Próximo viernes: {{PROXIMO_VIERNES_ISO}}
-Próximo sábado: {{PROXIMO_SABADO_ISO}}
-Próximo domingo: {{PROXIMO_DOMINGO_ISO}}
+Hoy ({{DIA_SEMANA}}): {{FECHA_HOY_ISO}} ({{FECHA_HOY_CL}})
+Mañana ({{MANANA_DIA}}): {{MANANA_ISO}} ({{MANANA_CL}})
+Pasado mañana ({{PASADO_MANANA_DIA}}): {{PASADO_MANANA_ISO}} ({{PASADO_MANANA_CL}})
 
-En 3 días: {{EN_3_DIAS_ISO}} ({{EN_3_DIAS_DIA}})
-En 5 días: {{EN_5_DIAS_ISO}} ({{EN_5_DIAS_DIA}})
-En 7 días / en una semana: {{EN_7_DIAS_ISO}} ({{EN_7_DIAS_DIA}})
-En 14 días / en dos semanas: {{EN_14_DIAS_ISO}} ({{EN_14_DIAS_DIA}})
-En 30 días / en un mes: {{EN_30_DIAS_ISO}} ({{EN_30_DIAS_DIA}})
+Próximo lunes: {{PROXIMO_LUNES_ISO}} ({{PROXIMO_LUNES_CL}})
+Próximo martes: {{PROXIMO_MARTES_ISO}} ({{PROXIMO_MARTES_CL}})
+Próximo miércoles: {{PROXIMO_MIERCOLES_ISO}} ({{PROXIMO_MIERCOLES_CL}})
+Próximo jueves: {{PROXIMO_JUEVES_ISO}} ({{PROXIMO_JUEVES_CL}})
+Próximo viernes: {{PROXIMO_VIERNES_ISO}} ({{PROXIMO_VIERNES_CL}})
+Próximo sábado: {{PROXIMO_SABADO_ISO}} ({{PROXIMO_SABADO_CL}})
+Próximo domingo: {{PROXIMO_DOMINGO_ISO}} ({{PROXIMO_DOMINGO_CL}})
 
-Fin de este mes: {{FIN_DE_MES_ISO}} ({{FIN_DE_MES_DIA}})
-Inicio del próximo mes: {{INICIO_PROXIMO_MES_ISO}} ({{INICIO_PROXIMO_MES_DIA}})
-Fin del próximo mes: {{FIN_PROXIMO_MES_ISO}} ({{FIN_PROXIMO_MES_DIA}})
+En 3 días: {{EN_3_DIAS_ISO}} ({{EN_3_DIAS_CL}}, {{EN_3_DIAS_DIA}})
+En 5 días: {{EN_5_DIAS_ISO}} ({{EN_5_DIAS_CL}}, {{EN_5_DIAS_DIA}})
+En 7 días / en una semana: {{EN_7_DIAS_ISO}} ({{EN_7_DIAS_CL}}, {{EN_7_DIAS_DIA}})
+En 14 días / en dos semanas: {{EN_14_DIAS_ISO}} ({{EN_14_DIAS_CL}}, {{EN_14_DIAS_DIA}})
+En 30 días / en un mes: {{EN_30_DIAS_ISO}} ({{EN_30_DIAS_CL}}, {{EN_30_DIAS_DIA}})
+
+Fin de este mes: {{FIN_DE_MES_ISO}} ({{FIN_DE_MES_CL}}, {{FIN_DE_MES_DIA}})
+Inicio del próximo mes: {{INICIO_PROXIMO_MES_ISO}} ({{INICIO_PROXIMO_MES_CL}}, {{INICIO_PROXIMO_MES_DIA}})
+Fin del próximo mes: {{FIN_PROXIMO_MES_ISO}} ({{FIN_PROXIMO_MES_CL}}, {{FIN_PROXIMO_MES_DIA}})
 
 ## Regla crítica de uso
 
 Si el usuario menciona un día de la semana (lunes, martes, etc.) o una expresión temporal relativa, busca la entrada exacta en esta tabla. NUNCA calcules tú la fecha mentalmente.
+
+CUANDO HABLES AL USUARIO en el chat, SIEMPRE usa el formato chileno DD/MM/AAAA (ej: "18/05/2026"). NUNCA muestres el ISO YYYY-MM-DD en el chat.
+
+CUANDO LLAMES LA TOOL crear_recordatorio, SIEMPRE usa el formato ISO YYYY-MM-DD en el campo fecha_vencimiento (ej: "2026-05-18"). NUNCA pases el formato chileno a la tool.
 
 Si la expresión del usuario no coincide claramente con ninguna entrada (ej: "en 6 meses", "el 12 de abril del 2027", "el lunes siguiente al del próximo lunes"), pregunta al usuario que sea más específico o pídele la fecha exacta en formato día/mes/año.
 
@@ -1051,10 +1059,11 @@ Si el dueño dice "en 3 días", "la próxima semana", "el viernes", "mañana":
 ### Regla 4 — Respuesta corta al crear.
 
 Después de que la tool se ejecute con éxito, responde corto y natural:
-- "Listo, agendado para el 12 de diciembre."
+- "Listo, agendado para el 18/05/2026."
 - "Listo, te lo dejé anotado."
 
 NO expliques en qué pestaña queda. NO menciones "Creados por mí". NO ofrezcas modificarlo. Solo confirma que está hecho.
+Usa SIEMPRE el formato chileno DD/MM/AAAA al confirmar. NUNCA muestres la fecha en formato ISO al usuario.
 
 ### Regla 5 — Si la tool falla.
 
@@ -1107,6 +1116,14 @@ function buildSystemPrompt({ nombreCliente, rolCliente, nombreEmpresa, rubro, tr
     const mm  = String(d.getUTCMonth() + 1).padStart(2, '0');
     const dd  = String(d.getUTCDate()).padStart(2, '0');
     return `${yy}-${mm}-${dd}`;
+  }
+
+  // Formatea un Date UTC como "DD/MM/AAAA" (formato chileno conversacional)
+  function clStr(d) {
+    const yy  = d.getUTCFullYear();
+    const mm  = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd  = String(d.getUTCDate()).padStart(2, '0');
+    return `${dd}/${mm}/${yy}`;
   }
 
   // Nombre del día de la semana en español
@@ -1174,37 +1191,55 @@ function buildSystemPrompt({ nombreCliente, rolCliente, nombreEmpresa, rubro, tr
     .replace(/\{\{RUBRO\}\}/g,                   rubro         || 'su rubro')
     .replace(/\{\{TRATAMIENTO\}\}/g,             tratamiento   || 'tu')
     // Hotfix fecha (hoy)
-    .replace(/\{\{FECHA_HOY_LARGA\}\}/g,         fechaHoyLarga)
-    .replace(/\{\{FECHA_HOY_ISO\}\}/g,           todayISO)
-    .replace(/\{\{DIA_SEMANA\}\}/g,              diaNombre(hoyDate))
-    // Tabla de fechas relativas
-    .replace(/\{\{MANANA_ISO\}\}/g,              isoStr(manana))
-    .replace(/\{\{MANANA_DIA\}\}/g,              diaNombre(manana))
-    .replace(/\{\{PASADO_MANANA_ISO\}\}/g,       isoStr(pasadoManana))
-    .replace(/\{\{PASADO_MANANA_DIA\}\}/g,       diaNombre(pasadoManana))
-    .replace(/\{\{PROXIMO_LUNES_ISO\}\}/g,       isoStr(proxLunes))
-    .replace(/\{\{PROXIMO_MARTES_ISO\}\}/g,      isoStr(proxMartes))
-    .replace(/\{\{PROXIMO_MIERCOLES_ISO\}\}/g,   isoStr(proxMiercoles))
-    .replace(/\{\{PROXIMO_JUEVES_ISO\}\}/g,      isoStr(proxJueves))
-    .replace(/\{\{PROXIMO_VIERNES_ISO\}\}/g,     isoStr(proxViernes))
-    .replace(/\{\{PROXIMO_SABADO_ISO\}\}/g,      isoStr(proxSabado))
-    .replace(/\{\{PROXIMO_DOMINGO_ISO\}\}/g,     isoStr(proxDomingo))
-    .replace(/\{\{EN_3_DIAS_ISO\}\}/g,           isoStr(en3dias))
-    .replace(/\{\{EN_3_DIAS_DIA\}\}/g,           diaNombre(en3dias))
-    .replace(/\{\{EN_5_DIAS_ISO\}\}/g,           isoStr(en5dias))
-    .replace(/\{\{EN_5_DIAS_DIA\}\}/g,           diaNombre(en5dias))
-    .replace(/\{\{EN_7_DIAS_ISO\}\}/g,           isoStr(en7dias))
-    .replace(/\{\{EN_7_DIAS_DIA\}\}/g,           diaNombre(en7dias))
-    .replace(/\{\{EN_14_DIAS_ISO\}\}/g,          isoStr(en14dias))
-    .replace(/\{\{EN_14_DIAS_DIA\}\}/g,          diaNombre(en14dias))
-    .replace(/\{\{EN_30_DIAS_ISO\}\}/g,          isoStr(en30dias))
-    .replace(/\{\{EN_30_DIAS_DIA\}\}/g,          diaNombre(en30dias))
-    .replace(/\{\{FIN_DE_MES_ISO\}\}/g,          isoStr(finDeMes))
-    .replace(/\{\{FIN_DE_MES_DIA\}\}/g,          diaNombre(finDeMes))
-    .replace(/\{\{INICIO_PROXIMO_MES_ISO\}\}/g,  isoStr(inicioProxMes))
-    .replace(/\{\{INICIO_PROXIMO_MES_DIA\}\}/g,  diaNombre(inicioProxMes))
-    .replace(/\{\{FIN_PROXIMO_MES_ISO\}\}/g,     isoStr(finProxMes))
-    .replace(/\{\{FIN_PROXIMO_MES_DIA\}\}/g,     diaNombre(finProxMes));
+    .replace(/\{\{FECHA_HOY_LARGA\}\}/g,          fechaHoyLarga)
+    .replace(/\{\{FECHA_HOY_ISO\}\}/g,            todayISO)
+    .replace(/\{\{FECHA_HOY_CL\}\}/g,             clStr(hoyDate))
+    .replace(/\{\{DIA_SEMANA\}\}/g,               diaNombre(hoyDate))
+    // Tabla de fechas relativas (ISO + CL + día agrupados por fecha)
+    .replace(/\{\{MANANA_ISO\}\}/g,               isoStr(manana))
+    .replace(/\{\{MANANA_CL\}\}/g,                clStr(manana))
+    .replace(/\{\{MANANA_DIA\}\}/g,               diaNombre(manana))
+    .replace(/\{\{PASADO_MANANA_ISO\}\}/g,        isoStr(pasadoManana))
+    .replace(/\{\{PASADO_MANANA_CL\}\}/g,         clStr(pasadoManana))
+    .replace(/\{\{PASADO_MANANA_DIA\}\}/g,        diaNombre(pasadoManana))
+    .replace(/\{\{PROXIMO_LUNES_ISO\}\}/g,        isoStr(proxLunes))
+    .replace(/\{\{PROXIMO_LUNES_CL\}\}/g,         clStr(proxLunes))
+    .replace(/\{\{PROXIMO_MARTES_ISO\}\}/g,       isoStr(proxMartes))
+    .replace(/\{\{PROXIMO_MARTES_CL\}\}/g,        clStr(proxMartes))
+    .replace(/\{\{PROXIMO_MIERCOLES_ISO\}\}/g,    isoStr(proxMiercoles))
+    .replace(/\{\{PROXIMO_MIERCOLES_CL\}\}/g,     clStr(proxMiercoles))
+    .replace(/\{\{PROXIMO_JUEVES_ISO\}\}/g,       isoStr(proxJueves))
+    .replace(/\{\{PROXIMO_JUEVES_CL\}\}/g,        clStr(proxJueves))
+    .replace(/\{\{PROXIMO_VIERNES_ISO\}\}/g,      isoStr(proxViernes))
+    .replace(/\{\{PROXIMO_VIERNES_CL\}\}/g,       clStr(proxViernes))
+    .replace(/\{\{PROXIMO_SABADO_ISO\}\}/g,       isoStr(proxSabado))
+    .replace(/\{\{PROXIMO_SABADO_CL\}\}/g,        clStr(proxSabado))
+    .replace(/\{\{PROXIMO_DOMINGO_ISO\}\}/g,      isoStr(proxDomingo))
+    .replace(/\{\{PROXIMO_DOMINGO_CL\}\}/g,       clStr(proxDomingo))
+    .replace(/\{\{EN_3_DIAS_ISO\}\}/g,            isoStr(en3dias))
+    .replace(/\{\{EN_3_DIAS_CL\}\}/g,             clStr(en3dias))
+    .replace(/\{\{EN_3_DIAS_DIA\}\}/g,            diaNombre(en3dias))
+    .replace(/\{\{EN_5_DIAS_ISO\}\}/g,            isoStr(en5dias))
+    .replace(/\{\{EN_5_DIAS_CL\}\}/g,             clStr(en5dias))
+    .replace(/\{\{EN_5_DIAS_DIA\}\}/g,            diaNombre(en5dias))
+    .replace(/\{\{EN_7_DIAS_ISO\}\}/g,            isoStr(en7dias))
+    .replace(/\{\{EN_7_DIAS_CL\}\}/g,             clStr(en7dias))
+    .replace(/\{\{EN_7_DIAS_DIA\}\}/g,            diaNombre(en7dias))
+    .replace(/\{\{EN_14_DIAS_ISO\}\}/g,           isoStr(en14dias))
+    .replace(/\{\{EN_14_DIAS_CL\}\}/g,            clStr(en14dias))
+    .replace(/\{\{EN_14_DIAS_DIA\}\}/g,           diaNombre(en14dias))
+    .replace(/\{\{EN_30_DIAS_ISO\}\}/g,           isoStr(en30dias))
+    .replace(/\{\{EN_30_DIAS_CL\}\}/g,            clStr(en30dias))
+    .replace(/\{\{EN_30_DIAS_DIA\}\}/g,           diaNombre(en30dias))
+    .replace(/\{\{FIN_DE_MES_ISO\}\}/g,           isoStr(finDeMes))
+    .replace(/\{\{FIN_DE_MES_CL\}\}/g,            clStr(finDeMes))
+    .replace(/\{\{FIN_DE_MES_DIA\}\}/g,           diaNombre(finDeMes))
+    .replace(/\{\{INICIO_PROXIMO_MES_ISO\}\}/g,   isoStr(inicioProxMes))
+    .replace(/\{\{INICIO_PROXIMO_MES_CL\}\}/g,    clStr(inicioProxMes))
+    .replace(/\{\{INICIO_PROXIMO_MES_DIA\}\}/g,   diaNombre(inicioProxMes))
+    .replace(/\{\{FIN_PROXIMO_MES_ISO\}\}/g,      isoStr(finProxMes))
+    .replace(/\{\{FIN_PROXIMO_MES_CL\}\}/g,       clStr(finProxMes))
+    .replace(/\{\{FIN_PROXIMO_MES_DIA\}\}/g,      diaNombre(finProxMes));
 }
 
 module.exports = { buildSystemPrompt, SYSTEM_PROMPT_TEMPLATE };
