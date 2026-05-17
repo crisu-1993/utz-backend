@@ -99,7 +99,7 @@ const NIKO_TOOLS = [
         },
         hora_vencimiento: {
           type: 'string',
-          description: 'Hora del recordatorio en formato HH:MM (24h). Opcional — si no se proporciona, el recordatorio aplica todo el día y se notifica a las 8:00 AM.',
+          description: 'Hora del recordatorio en formato HH:MM (24h). Define el momento en que el recordatorio pasa de Próximo a Activo. Opcional en este input — si NO se proporciona, el sistema asigna 09:00 por defecto. Solo pasarlo si el usuario menciona una hora específica.',
         },
       },
       required: ['titulo', 'fecha_vencimiento'],
@@ -147,7 +147,7 @@ const NIKO_TOOLS = [
         },
         hora_vencimiento: {
           type: 'string',
-          description: 'Nueva hora HH:MM (opcional). Para QUITAR la hora existente, pasar "" o null.',
+          description: 'Nueva hora HH:MM (opcional). Si pasas "" o null, se resetea a 09:00 por defecto. La hora siempre es obligatoria en BD, no se puede "quitar".',
         },
         completado: {
           type: 'boolean',

@@ -99,7 +99,7 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
 
   // Validar formato de hora_vencimiento (opcional)
   // Acepta HH:MM o HH:MM:SS. Vacío o undefined → NULL.
-  let horaFinal = null;
+  let horaFinal = '09:00:00'; // Default si no llega o llega vacío
   if (hora_vencimiento && String(hora_vencimiento).trim() !== '') {
     const horaStr = String(hora_vencimiento).trim();
     const regexHora = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
@@ -119,20 +119,16 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
     if (origenFinal === 'niko_a_pedido') {
       const sesentaSegundosAtras = new Date(Date.now() - 60000).toISOString();
 
-      let queryDup = supabase
+      const { data: existente, error: errExistente } = await supabase
         .from('recordatorios')
         .select('*')
         .eq('empresa_id', empresa_id)
         .eq('titulo', tituloLimpio)
         .eq('fecha_vencimiento', fecha_vencimiento || null)
+        .eq('hora_vencimiento', horaFinal)
         .eq('origen', origenFinal)
-        .gte('created_at', sesentaSegundosAtras);
-
-      queryDup = horaFinal === null
-        ? queryDup.is('hora_vencimiento', null)
-        : queryDup.eq('hora_vencimiento', horaFinal);
-
-      const { data: existente, error: errExistente } = await queryDup.maybeSingle();
+        .gte('created_at', sesentaSegundosAtras)
+        .maybeSingle();
 
       if (errExistente) {
         console.warn('[crearRecordatorio] Error verificando duplicado, continuando:', errExistente.message);
@@ -310,7 +306,7 @@ async function actualizarRecordatorio({ empresa_id, id, titulo, descripcion, fec
 
     if (hora_vencimiento !== undefined) {
       if (hora_vencimiento === null || hora_vencimiento === '') {
-        updates.hora_vencimiento = null;
+        updates.hora_vencimiento = '09:00:00'; // Default si se "borra"
       } else {
         const horaStr = String(hora_vencimiento).trim();
         const regexHora = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
