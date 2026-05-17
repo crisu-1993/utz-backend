@@ -101,10 +101,6 @@ const NIKO_TOOLS = [
           type: 'string',
           description: 'Hora en formato HH:MM (24h). Default 09:00 si no se especifica.',
         },
-        forzar_creacion: {
-          type: 'boolean',
-          description: 'Si es false (default), verifica choques antes de crear: si hay choque exacto NO crea y devuelve los choques al modelo. Si es true, crea sin verificar (usado tras confirmación explícita del usuario).',
-        },
       },
       required: ['titulo', 'fecha_vencimiento'],
     },
@@ -244,12 +240,9 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
 
   if (name === 'crear_recordatorio') {
     const { crearRecordatorio } = require('../../routes/recordatorios');
-    const supabase = getSupabase();
-    const forzar   = input.forzar_creacion === true;
+    const supabase  = getSupabase();
     const horaFinal = input.hora_vencimiento || '09:00';
-
-    // Normalizar hora a HH:MM:SS para SQL
-    const horaSQL = horaFinal.length === 5 ? `${horaFinal}:00` : horaFinal;
+    const horaSQL   = horaFinal.length === 5 ? `${horaFinal}:00` : horaFinal;
 
     console.log('[ejecutarTool] Creando recordatorio:', {
       tool_use_id,
@@ -258,52 +251,30 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
       titulo:            input.titulo,
       fecha_vencimiento: input.fecha_vencimiento,
       hora_vencimiento:  horaFinal,
-      forzar_creacion:   forzar,
     });
 
-    // Si NO se fuerza, verificar choques internamente
-    let avisoCercanos = null;
-    if (!forzar) {
-      const { data: choquesData, error: choquesError } = await supabase.rpc('verificar_choque_recordatorio', {
-        p_empresa_id: empresa_id,
-        p_fecha:      input.fecha_vencimiento,
-        p_hora:       horaSQL,
-      });
+    // Verificar choques (informativo, no bloqueante)
+    let choquesAviso = null;
+    const { data: choquesData, error: choquesError } = await supabase.rpc('verificar_choque_recordatorio', {
+      p_empresa_id: empresa_id,
+      p_fecha:      input.fecha_vencimiento,
+      p_hora:       horaSQL,
+    });
 
-      if (choquesError) {
-        console.error('[ejecutarTool] Error verificar_choque interno:', choquesError.message);
-        // Fallback: continuar con creación normal sin verificación
-      } else {
-        const choques = (choquesData || []).map(r => ({
-          id:                r.id,
-          titulo:            r.titulo,
-          fecha_vencimiento: r.fecha_vencimiento,
-          hora_vencimiento:  r.hora_vencimiento,
-          tipo_choque:       r.tipo_choque,
-        }));
-
-        const choquesExactos  = choques.filter(c => c.tipo_choque === 'exacto');
-        const choquesCercanos = choques.filter(c => c.tipo_choque === 'cercano');
-
-        // CASO B: hay choques EXACTOS → NO crear, devolver para que Niko pregunte
-        if (choquesExactos.length > 0) {
-          return {
-            ok:               true,
-            creado:           false,
-            mensaje:          'Hay choque exacto de horario. No se creó el recordatorio. Pregunta al usuario si quiere crearlo igual.',
-            choques_exactos:  choquesExactos,
-            choques_cercanos: choquesCercanos,
-          };
-        }
-
-        // CASO C: solo choques CERCANOS → crear igual, guardar para aviso
-        if (choquesCercanos.length > 0) {
-          avisoCercanos = choquesCercanos;
-        }
-      }
+    if (choquesError) {
+      console.error('[ejecutarTool] Error verificar_choque interno:', choquesError.message);
+      // Fallback: continuar sin avisos
+    } else if (choquesData && choquesData.length > 0) {
+      choquesAviso = choquesData.map(r => ({
+        id:                r.id,
+        titulo:            r.titulo,
+        fecha_vencimiento: r.fecha_vencimiento,
+        hora_vencimiento:  r.hora_vencimiento,
+        tipo_choque:       r.tipo_choque,  // 'exacto' o 'cercano' (informativo)
+      }));
     }
 
-    // CASO A (sin choque) / CASO C (solo cercanos) / forzar_creacion=true → CREAR
+    // CREAR siempre
     const resultado = await crearRecordatorio({
       empresa_id,
       user_id,
@@ -319,16 +290,15 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
     }
 
     return {
-      ok:               true,
-      creado:           true,
-      mensaje:          'Recordatorio creado.',
+      ok:      true,
+      mensaje: 'Recordatorio creado.',
       datos: {
         recordatorio_id:   resultado.recordatorio.id,
         titulo:            resultado.recordatorio.titulo,
         fecha_vencimiento: resultado.recordatorio.fecha_vencimiento,
         hora_vencimiento:  horaFinal,
       },
-      choques_cercanos: avisoCercanos,
+      choques: choquesAviso,
     };
   }
 
