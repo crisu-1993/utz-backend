@@ -78,7 +78,7 @@ router.get('/', authMiddleware, async (req, res) => {
 //   origen            {string?} 'manual' (default) | 'niko_a_pedido'
 // @returns {object} { ok: true, recordatorio } | { ok: false, mensaje, status }
 
-async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fecha_vencimiento, origen }) {
+async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fecha_vencimiento, hora_vencimiento, origen }) {
   const origenFinal = origen ?? 'manual';
 
   if (!titulo || !String(titulo).trim()) {
@@ -97,6 +97,18 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
     return { ok: false, mensaje: 'origen debe ser "manual" o "niko_a_pedido"', status: 400 };
   }
 
+  // Validar formato de hora_vencimiento (opcional)
+  // Acepta HH:MM o HH:MM:SS. Vacío o undefined → NULL.
+  let horaFinal = null;
+  if (hora_vencimiento && String(hora_vencimiento).trim() !== '') {
+    const horaStr = String(hora_vencimiento).trim();
+    const regexHora = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
+    if (!regexHora.test(horaStr)) {
+      return { ok: false, mensaje: 'Formato de hora inválido (esperado HH:MM)', status: 400 };
+    }
+    horaFinal = horaStr.length === 5 ? `${horaStr}:00` : horaStr;
+  }
+
   const supabase = getSupabase();
 
   // Calcular titulo limpio una vez (reutilizado abajo)
@@ -107,15 +119,20 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
     if (origenFinal === 'niko_a_pedido') {
       const sesentaSegundosAtras = new Date(Date.now() - 60000).toISOString();
 
-      const { data: existente, error: errExistente } = await supabase
+      let queryDup = supabase
         .from('recordatorios')
         .select('*')
         .eq('empresa_id', empresa_id)
         .eq('titulo', tituloLimpio)
         .eq('fecha_vencimiento', fecha_vencimiento || null)
         .eq('origen', origenFinal)
-        .gte('created_at', sesentaSegundosAtras)
-        .maybeSingle();
+        .gte('created_at', sesentaSegundosAtras);
+
+      queryDup = horaFinal === null
+        ? queryDup.is('hora_vencimiento', null)
+        : queryDup.eq('hora_vencimiento', horaFinal);
+
+      const { data: existente, error: errExistente } = await queryDup.maybeSingle();
 
       if (errExistente) {
         console.warn('[crearRecordatorio] Error verificando duplicado, continuando:', errExistente.message);
@@ -131,6 +148,7 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
       titulo:            tituloLimpio,
       descripcion:       descripcion ? String(descripcion).trim() : null,
       fecha_vencimiento: fecha_vencimiento || null,
+      hora_vencimiento:  horaFinal,
       origen:            origenFinal,
     };
 
@@ -151,10 +169,10 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
 }
 
 // ─── POST /api/recordatorios ──────────────────────────────────────────────────
-// Body: { titulo, descripcion?, fecha_vencimiento? }
+// Body: { titulo, descripcion?, fecha_vencimiento?, hora_vencimiento? }
 router.post('/', authMiddleware, async (req, res) => {
   const { empresa_id, user_id } = req.auth;
-  const { titulo, descripcion, fecha_vencimiento } = req.body || {};
+  const { titulo, descripcion, fecha_vencimiento, hora_vencimiento } = req.body || {};
 
   const resultado = await crearRecordatorio({
     empresa_id,
@@ -162,6 +180,7 @@ router.post('/', authMiddleware, async (req, res) => {
     titulo,
     descripcion,
     fecha_vencimiento,
+    hora_vencimiento,
     origen: 'manual',
   });
 
@@ -247,7 +266,7 @@ async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqu
 //   completado        {boolean?} true/false para completar/descompletar
 // @returns {object} { ok: true, recordatorio } | { ok: false, mensaje, status }
 
-async function actualizarRecordatorio({ empresa_id, id, titulo, descripcion, fecha_vencimiento, completado }) {
+async function actualizarRecordatorio({ empresa_id, id, titulo, descripcion, fecha_vencimiento, hora_vencimiento, completado }) {
   const supabase = getSupabase();
 
   try {
@@ -287,6 +306,19 @@ async function actualizarRecordatorio({ empresa_id, id, titulo, descripcion, fec
         return { ok: false, mensaje: 'fecha_vencimiento debe tener formato YYYY-MM-DD', status: 400 };
       }
       updates.fecha_vencimiento = fecha_vencimiento || null;
+    }
+
+    if (hora_vencimiento !== undefined) {
+      if (hora_vencimiento === null || hora_vencimiento === '') {
+        updates.hora_vencimiento = null;
+      } else {
+        const horaStr = String(hora_vencimiento).trim();
+        const regexHora = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
+        if (!regexHora.test(horaStr)) {
+          return { ok: false, mensaje: 'Formato de hora inválido (esperado HH:MM)', status: 400 };
+        }
+        updates.hora_vencimiento = horaStr.length === 5 ? `${horaStr}:00` : horaStr;
+      }
     }
 
     if (completado !== undefined) {
@@ -360,10 +392,10 @@ async function eliminarRecordatorio({ empresa_id, id }) {
 router.patch('/:id', authMiddleware, async (req, res) => {
   const { empresa_id } = req.auth;
   const { id }         = req.params;
-  const { titulo, descripcion, fecha_vencimiento, completado } = req.body || {};
+  const { titulo, descripcion, fecha_vencimiento, hora_vencimiento, completado } = req.body || {};
 
   const resultado = await actualizarRecordatorio({
-    empresa_id, id, titulo, descripcion, fecha_vencimiento, completado,
+    empresa_id, id, titulo, descripcion, fecha_vencimiento, hora_vencimiento, completado,
   });
 
   if (!resultado.ok) {

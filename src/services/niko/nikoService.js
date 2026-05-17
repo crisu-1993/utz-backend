@@ -97,6 +97,10 @@ const NIKO_TOOLS = [
           type: 'string',
           description: 'Fecha en formato ISO YYYY-MM-DD (ej: "2026-05-18"). OBLIGATORIA. NUNCA uses formato chileno DD/MM/AAAA en este campo, solo ISO. Si el usuario no dio fecha o es relativa, NO llames la tool todavía — pregunta o confirma primero.',
         },
+        hora_vencimiento: {
+          type: 'string',
+          description: 'Hora del recordatorio en formato HH:MM (24h). Opcional — si no se proporciona, el recordatorio aplica todo el día y se notifica a las 8:00 AM.',
+        },
       },
       required: ['titulo', 'fecha_vencimiento'],
     },
@@ -140,6 +144,10 @@ const NIKO_TOOLS = [
         fecha_vencimiento: {
           type: 'string',
           description: 'Nueva fecha YYYY-MM-DD (opcional).',
+        },
+        hora_vencimiento: {
+          type: 'string',
+          description: 'Nueva hora HH:MM (opcional). Para QUITAR la hora existente, pasar "" o null.',
         },
         completado: {
           type: 'boolean',
@@ -247,6 +255,7 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
       titulo:            input.titulo,
       descripcion:       input.descripcion || null,
       fecha_vencimiento: input.fecha_vencimiento,
+      hora_vencimiento:  input.hora_vencimiento,
       origen:            'niko_a_pedido',   // hardcodeado — nunca del input de Claude
     });
 
@@ -287,6 +296,7 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
       titulo:            r.titulo,
       descripcion:       r.descripcion,
       fecha_vencimiento: r.fecha_vencimiento,
+      hora_vencimiento:  r.hora_vencimiento,
       completado:        r.completado,
     }));
 
@@ -306,6 +316,7 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
       titulo:            input.titulo,
       descripcion:       input.descripcion,
       fecha_vencimiento: input.fecha_vencimiento,
+      hora_vencimiento:  input.hora_vencimiento,
       completado:        input.completado,
     });
 
