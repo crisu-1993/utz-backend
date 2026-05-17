@@ -172,17 +172,75 @@ router.post('/', authMiddleware, async (req, res) => {
   return res.status(201).json({ ok: true, recordatorio: resultado.recordatorio });
 });
 
-// ─── PATCH /api/recordatorios/:id ────────────────────────────────────────────
-// Body: { titulo?, descripcion?, fecha_vencimiento?, completado? }
-router.patch('/:id', authMiddleware, async (req, res) => {
-  const { empresa_id } = req.auth;
-  const { id }         = req.params;
-  const { titulo, descripcion, fecha_vencimiento, completado } = req.body || {};
+// ─── listarRecordatorios ────────────────────────────────────────────────────────────────
+//
+// Función pura: lista recordatorios de una empresa con filtros opcionales.
+// Usada por la tool listar_recordatorios de Niko.
+//
+// @param {object} params
+//   empresa_id      {string}   UUID de la empresa (requerido)
+//   dias_adelante   {number}   Días hacia el futuro a incluir (default 3)
+//   titulo_busqueda {string?}  Filtro por texto parcial del título
+//   completado      {boolean?} Si viene, filtra por estado completado
+// @returns {object} { ok: true, recordatorios: [...] } | { ok: false, mensaje, status }
 
+async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqueda, completado }) {
   const supabase = getSupabase();
 
   try {
-    // Verificar que el recordatorio pertenece a esta empresa
+    // Calcular hoy y el límite en timezone Santiago
+    const hoyStr    = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
+    const hoyMs     = new Date(hoyStr + 'T00:00:00Z').getTime();
+    const limiteMs  = hoyMs + dias_adelante * 86400000;
+    const limiteStr = new Date(limiteMs).toISOString().slice(0, 10); // YYYY-MM-DD
+
+    let query = supabase
+      .from('recordatorios')
+      .select('*')
+      .eq('empresa_id', empresa_id)
+      .or(`fecha_vencimiento.is.null,fecha_vencimiento.lte.${limiteStr}`)
+      .order('fecha_vencimiento', { ascending: true, nullsFirst: true })
+      .limit(10);
+
+    if (titulo_busqueda) {
+      query = query.ilike('titulo', `%${titulo_busqueda}%`);
+    }
+
+    if (completado !== undefined) {
+      query = query.eq('completado', completado);
+    }
+
+    const { data, error } = await query;
+
+    if (error) throw new Error(error.message);
+
+    return { ok: true, recordatorios: data };
+
+  } catch (err) {
+    console.error('[recordatorios] Error en listarRecordatorios:', err.message);
+    return { ok: false, mensaje: err.message, status: 500 };
+  }
+}
+
+// ─── actualizarRecordatorio ────────────────────────────────────────────────────────────────
+//
+// Función pura: actualiza campos de un recordatorio existente.
+// Usada por el endpoint PATCH y por la tool de Niko.
+//
+// @param {object} params
+//   empresa_id        {string}   UUID de la empresa (ownership check)
+//   id                {string}   UUID del recordatorio
+//   titulo            {string?}  Nuevo título
+//   descripcion       {string?}  Nueva descripción (null borra la actual)
+//   fecha_vencimiento {string?}  Nueva fecha YYYY-MM-DD (null borra la actual)
+//   completado        {boolean?} true/false para completar/descompletar
+// @returns {object} { ok: true, recordatorio } | { ok: false, mensaje, status }
+
+async function actualizarRecordatorio({ empresa_id, id, titulo, descripcion, fecha_vencimiento, completado }) {
+  const supabase = getSupabase();
+
+  try {
+    // Ownership check
     const { data: existente, error: errBuscar } = await supabase
       .from('recordatorios')
       .select('id')
@@ -193,18 +251,18 @@ router.patch('/:id', authMiddleware, async (req, res) => {
     if (errBuscar) throw new Error(errBuscar.message);
 
     if (!existente) {
-      return res.status(404).json({ ok: false, error: 'Recordatorio no encontrado' });
+      return { ok: false, mensaje: 'Recordatorio no encontrado', status: 404 };
     }
 
-    // Construir solo los campos que vienen en el body
+    // Construir solo los campos que vienen != undefined
     const updates = { updated_at: new Date().toISOString() };
 
     if (titulo !== undefined) {
       if (!String(titulo).trim()) {
-        return res.status(400).json({ ok: false, error: 'El título no puede estar vacío' });
+        return { ok: false, mensaje: 'El título no puede estar vacío', status: 400 };
       }
       if (String(titulo).trim().length > 200) {
-        return res.status(400).json({ ok: false, error: 'El título no puede superar 200 caracteres' });
+        return { ok: false, mensaje: 'El título no puede superar 200 caracteres', status: 400 };
       }
       updates.titulo = String(titulo).trim();
     }
@@ -215,7 +273,7 @@ router.patch('/:id', authMiddleware, async (req, res) => {
 
     if (fecha_vencimiento !== undefined) {
       if (fecha_vencimiento && !/^\d{4}-\d{2}-\d{2}$/.test(fecha_vencimiento)) {
-        return res.status(400).json({ ok: false, error: 'fecha_vencimiento debe tener formato YYYY-MM-DD' });
+        return { ok: false, mensaje: 'fecha_vencimiento debe tener formato YYYY-MM-DD', status: 400 };
       }
       updates.fecha_vencimiento = fecha_vencimiento || null;
     }
@@ -234,23 +292,29 @@ router.patch('/:id', authMiddleware, async (req, res) => {
 
     if (error) throw new Error(error.message);
 
-    return res.json({ ok: true, recordatorio: data });
+    return { ok: true, recordatorio: data };
 
   } catch (err) {
-    console.error('[recordatorios] Error en PATCH /:id', err.message);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error('[recordatorios] Error en actualizarRecordatorio:', err.message);
+    return { ok: false, mensaje: err.message, status: 500 };
   }
-});
+}
 
-// ─── DELETE /api/recordatorios/:id ───────────────────────────────────────────
-router.delete('/:id', authMiddleware, async (req, res) => {
-  const { empresa_id } = req.auth;
-  const { id }         = req.params;
+// ─── eliminarRecordatorio ────────────────────────────────────────────────────────────────────
+//
+// Función pura: elimina un recordatorio por id.
+// Usada por el endpoint DELETE y por la tool de Niko.
+//
+// @param {object} params
+//   empresa_id {string} UUID de la empresa (ownership check)
+//   id         {string} UUID del recordatorio
+// @returns {object} { ok: true, id } | { ok: false, mensaje, status }
 
+async function eliminarRecordatorio({ empresa_id, id }) {
   const supabase = getSupabase();
 
   try {
-    // Verificar que pertenece a esta empresa antes de borrar
+    // Ownership check
     const { data: existente, error: errBuscar } = await supabase
       .from('recordatorios')
       .select('id')
@@ -261,7 +325,7 @@ router.delete('/:id', authMiddleware, async (req, res) => {
     if (errBuscar) throw new Error(errBuscar.message);
 
     if (!existente) {
-      return res.status(404).json({ ok: false, error: 'Recordatorio no encontrado' });
+      return { ok: false, mensaje: 'Recordatorio no encontrado', status: 404 };
     }
 
     const { error } = await supabase
@@ -272,13 +336,49 @@ router.delete('/:id', authMiddleware, async (req, res) => {
 
     if (error) throw new Error(error.message);
 
-    return res.json({ ok: true, id });
+    return { ok: true, id };
 
   } catch (err) {
-    console.error('[recordatorios] Error en DELETE /:id', err.message);
-    return res.status(500).json({ ok: false, error: err.message });
+    console.error('[recordatorios] Error en eliminarRecordatorio:', err.message);
+    return { ok: false, mensaje: err.message, status: 500 };
   }
+}
+
+// ─── PATCH /api/recordatorios/:id ────────────────────────────────────────────
+// Body: { titulo?, descripcion?, fecha_vencimiento?, completado? }
+router.patch('/:id', authMiddleware, async (req, res) => {
+  const { empresa_id } = req.auth;
+  const { id }         = req.params;
+  const { titulo, descripcion, fecha_vencimiento, completado } = req.body || {};
+
+  const resultado = await actualizarRecordatorio({
+    empresa_id, id, titulo, descripcion, fecha_vencimiento, completado,
+  });
+
+  if (!resultado.ok) {
+    return res.status(resultado.status || 500).json({ ok: false, error: resultado.mensaje });
+  }
+
+  return res.json({ ok: true, recordatorio: resultado.recordatorio });
 });
 
-module.exports                    = router;
-module.exports.crearRecordatorio  = crearRecordatorio;
+
+// ─── DELETE /api/recordatorios/:id ───────────────────────────────────────────
+router.delete('/:id', authMiddleware, async (req, res) => {
+  const { empresa_id } = req.auth;
+  const { id }         = req.params;
+
+  const resultado = await eliminarRecordatorio({ empresa_id, id });
+
+  if (!resultado.ok) {
+    return res.status(resultado.status || 500).json({ ok: false, error: resultado.mensaje });
+  }
+
+  return res.json({ ok: true, id: resultado.id });
+});
+
+module.exports                        = router;
+module.exports.crearRecordatorio      = crearRecordatorio;
+module.exports.listarRecordatorios    = listarRecordatorios;
+module.exports.actualizarRecordatorio = actualizarRecordatorio;
+module.exports.eliminarRecordatorio   = eliminarRecordatorio;

@@ -101,6 +101,68 @@ const NIKO_TOOLS = [
       required: ['titulo', 'fecha_vencimiento'],
     },
   },
+  {
+    name: 'listar_recordatorios',
+    description: "Lista los recordatorios del usuario para los PRÓXIMOS 3 DÍAS (hoy y próximos 3). Úsala cuando el usuario te pregunta '¿qué tengo pendiente?' o necesitas identificar un recordatorio para editar/eliminar. Si el usuario pide recordatorios más allá de 3 días, NO llames la tool — invítalo a revisar la pestaña /recordatorios.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        titulo_busqueda: {
+          type: 'string',
+          description: 'Palabra clave para buscar en el título (opcional). Útil cuando el usuario menciona un recordatorio por nombre parcial.',
+        },
+        completado: {
+          type: 'boolean',
+          description: 'Si true, lista solo completados. Si false, solo pendientes. Si se omite, lista todos.',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'actualizar_recordatorio',
+    description: "Actualiza un recordatorio existente. Cubre TODOS los casos: editar (título/descripción/fecha) Y completar/descompletar. Llama esta tool SOLO después de identificar el recordatorio con listar_recordatorios y obtener confirmación del usuario.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'UUID del recordatorio (obtenido de listar_recordatorios). NUNCA inventes este valor.',
+        },
+        titulo: {
+          type: 'string',
+          description: 'Nuevo título (opcional).',
+        },
+        descripcion: {
+          type: 'string',
+          description: 'Nueva descripción (opcional).',
+        },
+        fecha_vencimiento: {
+          type: 'string',
+          description: 'Nueva fecha YYYY-MM-DD (opcional).',
+        },
+        completado: {
+          type: 'boolean',
+          description: 'true para marcar completado, false para descompletar.',
+        },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'eliminar_recordatorio',
+    description: "Elimina un recordatorio definitivamente. Acción irreversible. Llama esta tool SOLO después de identificar con listar_recordatorios y recibir DOBLE confirmación del usuario.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'UUID del recordatorio (obtenido de listar_recordatorios). NUNCA inventes este valor.',
+        },
+      },
+      required: ['id'],
+    },
+  },
 ];
 
 function getSupabase() {
@@ -204,6 +266,73 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
         mensaje: `Error al crear recordatorio: ${resultado.mensaje}`,
       };
     }
+  }
+
+  if (name === 'listar_recordatorios') {
+    const { listarRecordatorios } = require('../../routes/recordatorios');
+
+    const resultado = await listarRecordatorios({
+      empresa_id,
+      dias_adelante:   3,
+      titulo_busqueda: input.titulo_busqueda,
+      completado:      input.completado,
+    });
+
+    if (!resultado.ok) {
+      return { ok: false, mensaje: resultado.mensaje || 'No pude listar los recordatorios' };
+    }
+
+    const lista = resultado.recordatorios.map(r => ({
+      id:                r.id,
+      titulo:            r.titulo,
+      descripcion:       r.descripcion,
+      fecha_vencimiento: r.fecha_vencimiento,
+      completado:        r.completado,
+    }));
+
+    return {
+      ok:      true,
+      mensaje: `Encontré ${lista.length} recordatorio${lista.length !== 1 ? 's' : ''}.`,
+      datos:   lista,
+    };
+  }
+
+  if (name === 'actualizar_recordatorio') {
+    const { actualizarRecordatorio } = require('../../routes/recordatorios');
+
+    const resultado = await actualizarRecordatorio({
+      empresa_id,
+      id:                input.id,
+      titulo:            input.titulo,
+      descripcion:       input.descripcion,
+      fecha_vencimiento: input.fecha_vencimiento,
+      completado:        input.completado,
+    });
+
+    if (!resultado.ok) {
+      return { ok: false, mensaje: resultado.mensaje || 'No pude actualizar el recordatorio' };
+    }
+
+    return {
+      ok:      true,
+      mensaje: 'Recordatorio actualizado correctamente.',
+      datos:   resultado.recordatorio,
+    };
+  }
+
+  if (name === 'eliminar_recordatorio') {
+    const { eliminarRecordatorio } = require('../../routes/recordatorios');
+
+    const resultado = await eliminarRecordatorio({
+      empresa_id,
+      id: input.id,
+    });
+
+    if (!resultado.ok) {
+      return { ok: false, mensaje: resultado.mensaje || 'No pude eliminar el recordatorio' };
+    }
+
+    return { ok: true, mensaje: 'Recordatorio eliminado.' };
   }
 
   console.error('[ejecutarTool] Tool desconocida:', name);
