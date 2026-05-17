@@ -171,6 +171,24 @@ const NIKO_TOOLS = [
       required: ['id'],
     },
   },
+  {
+    name: 'verificar_choque_horario',
+    description: "Verifica si ya hay un recordatorio agendado para una fecha y hora específicas. Devuelve la lista de recordatorios que chocan (vacía si no hay choque). Llama esta tool ANTES de crear un recordatorio para detectar conflictos de agenda.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        fecha_vencimiento: {
+          type: 'string',
+          description: 'Fecha a verificar en formato YYYY-MM-DD',
+        },
+        hora_vencimiento: {
+          type: 'string',
+          description: 'Hora a verificar en formato HH:MM (24h)',
+        },
+      },
+      required: ['fecha_vencimiento', 'hora_vencimiento'],
+    },
+  },
 ];
 
 function getSupabase() {
@@ -344,6 +362,43 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
     }
 
     return { ok: true, mensaje: 'Recordatorio eliminado.' };
+  }
+
+  if (name === 'verificar_choque_horario') {
+    const supabase = getSupabase();
+
+    // Normalizar hora a HH:MM:SS
+    const horaStr = String(input.hora_vencimiento).trim();
+    const regexHora = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
+    if (!regexHora.test(horaStr)) {
+      return { ok: false, mensaje: 'Formato de hora inválido' };
+    }
+    const horaFinal = horaStr.length === 5 ? `${horaStr}:00` : horaStr;
+
+    const { data, error } = await supabase.rpc('verificar_choque_recordatorio', {
+      p_empresa_id: empresa_id,
+      p_fecha:      input.fecha_vencimiento,
+      p_hora:       horaFinal,
+    });
+
+    if (error) {
+      console.error('[ejecutarTool] Error verificar_choque:', error.message);
+      return { ok: false, mensaje: 'No pude verificar conflictos de horario.' };
+    }
+
+    const choques = (data || []).map(r => ({
+      id:                r.id,
+      titulo:            r.titulo,
+      fecha_vencimiento: r.fecha_vencimiento,
+      hora_vencimiento:  r.hora_vencimiento,
+      tipo_choque:       r.tipo_choque,
+    }));
+
+    return {
+      ok:      true,
+      mensaje: choques.length === 0 ? 'No hay choque de horario.' : `Hay ${choques.length} recordatorio${choques.length > 1 ? 's' : ''} en ese horario.`,
+      datos:   choques,
+    };
   }
 
   console.error('[ejecutarTool] Tool desconocida:', name);
