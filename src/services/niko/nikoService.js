@@ -87,19 +87,23 @@ const NIKO_TOOLS = [
       properties: {
         titulo: {
           type: 'string',
-          description: 'Texto corto que resume el recordatorio. Máximo 200 caracteres. Ejemplo: "Pagar IVA" o "Revisar ventas del mes".',
+          description: 'Título corto del recordatorio.',
         },
         descripcion: {
           type: 'string',
-          description: 'Detalle adicional opcional del recordatorio. Solo úsalo si el usuario dio contexto extra.',
+          description: 'Descripción opcional del recordatorio.',
         },
         fecha_vencimiento: {
           type: 'string',
-          description: 'Fecha en formato ISO YYYY-MM-DD (ej: "2026-05-18"). OBLIGATORIA. NUNCA uses formato chileno DD/MM/AAAA en este campo, solo ISO. Si el usuario no dio fecha o es relativa, NO llames la tool todavía — pregunta o confirma primero.',
+          description: 'Fecha en formato YYYY-MM-DD.',
         },
         hora_vencimiento: {
           type: 'string',
-          description: 'Hora del recordatorio en formato HH:MM (24h). Define el momento en que el recordatorio pasa de Próximo a Activo. Opcional en este input — si NO se proporciona, el sistema asigna 09:00 por defecto. Solo pasarlo si el usuario menciona una hora específica.',
+          description: 'Hora en formato HH:MM (24h). Default 09:00 si no se especifica.',
+        },
+        forzar_creacion: {
+          type: 'boolean',
+          description: 'Si es false (default), verifica choques antes de crear: si hay choque exacto NO crea y devuelve los choques al modelo. Si es true, crea sin verificar (usado tras confirmación explícita del usuario).',
         },
       },
       required: ['titulo', 'fecha_vencimiento'],
@@ -171,24 +175,6 @@ const NIKO_TOOLS = [
       required: ['id'],
     },
   },
-  {
-    name: 'verificar_choque_horario',
-    description: "Verifica si ya hay un recordatorio agendado para una fecha y hora específicas. Devuelve la lista de recordatorios que chocan (vacía si no hay choque). Llama esta tool ANTES de crear un recordatorio para detectar conflictos de agenda.",
-    input_schema: {
-      type: 'object',
-      properties: {
-        fecha_vencimiento: {
-          type: 'string',
-          description: 'Fecha a verificar en formato YYYY-MM-DD',
-        },
-        hora_vencimiento: {
-          type: 'string',
-          description: 'Hora a verificar en formato HH:MM (24h)',
-        },
-      },
-      required: ['fecha_vencimiento', 'hora_vencimiento'],
-    },
-  },
 ];
 
 function getSupabase() {
@@ -258,6 +244,12 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
 
   if (name === 'crear_recordatorio') {
     const { crearRecordatorio } = require('../../routes/recordatorios');
+    const supabase = getSupabase();
+    const forzar   = input.forzar_creacion === true;
+    const horaFinal = input.hora_vencimiento || '09:00';
+
+    // Normalizar hora a HH:MM:SS para SQL
+    const horaSQL = horaFinal.length === 5 ? `${horaFinal}:00` : horaFinal;
 
     console.log('[ejecutarTool] Creando recordatorio:', {
       tool_use_id,
@@ -265,34 +257,79 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
       user_id,
       titulo:            input.titulo,
       fecha_vencimiento: input.fecha_vencimiento,
+      hora_vencimiento:  horaFinal,
+      forzar_creacion:   forzar,
     });
 
+    // Si NO se fuerza, verificar choques internamente
+    let avisoCercanos = null;
+    if (!forzar) {
+      const { data: choquesData, error: choquesError } = await supabase.rpc('verificar_choque_recordatorio', {
+        p_empresa_id: empresa_id,
+        p_fecha:      input.fecha_vencimiento,
+        p_hora:       horaSQL,
+      });
+
+      if (choquesError) {
+        console.error('[ejecutarTool] Error verificar_choque interno:', choquesError.message);
+        // Fallback: continuar con creación normal sin verificación
+      } else {
+        const choques = (choquesData || []).map(r => ({
+          id:                r.id,
+          titulo:            r.titulo,
+          fecha_vencimiento: r.fecha_vencimiento,
+          hora_vencimiento:  r.hora_vencimiento,
+          tipo_choque:       r.tipo_choque,
+        }));
+
+        const choquesExactos  = choques.filter(c => c.tipo_choque === 'exacto');
+        const choquesCercanos = choques.filter(c => c.tipo_choque === 'cercano');
+
+        // CASO B: hay choques EXACTOS → NO crear, devolver para que Niko pregunte
+        if (choquesExactos.length > 0) {
+          return {
+            ok:               true,
+            creado:           false,
+            mensaje:          'Hay choque exacto de horario. No se creó el recordatorio. Pregunta al usuario si quiere crearlo igual.',
+            choques_exactos:  choquesExactos,
+            choques_cercanos: choquesCercanos,
+          };
+        }
+
+        // CASO C: solo choques CERCANOS → crear igual, guardar para aviso
+        if (choquesCercanos.length > 0) {
+          avisoCercanos = choquesCercanos;
+        }
+      }
+    }
+
+    // CASO A (sin choque) / CASO C (solo cercanos) / forzar_creacion=true → CREAR
     const resultado = await crearRecordatorio({
       empresa_id,
       user_id,
       titulo:            input.titulo,
       descripcion:       input.descripcion || null,
       fecha_vencimiento: input.fecha_vencimiento,
-      hora_vencimiento:  input.hora_vencimiento,
-      origen:            'niko_a_pedido',   // hardcodeado — nunca del input de Claude
+      hora_vencimiento:  horaFinal,
+      origen:            'niko_a_pedido',
     });
 
-    if (resultado.ok) {
-      return {
-        ok:      true,
-        mensaje: `Recordatorio creado para el ${resultado.recordatorio.fecha_vencimiento}: ${resultado.recordatorio.titulo}`,
-        datos: {
-          recordatorio_id:   resultado.recordatorio.id,
-          titulo:            resultado.recordatorio.titulo,
-          fecha_vencimiento: resultado.recordatorio.fecha_vencimiento,
-        },
-      };
-    } else {
-      return {
-        ok:      false,
-        mensaje: `Error al crear recordatorio: ${resultado.mensaje}`,
-      };
+    if (!resultado.ok) {
+      return { ok: false, mensaje: resultado.mensaje || 'No pude crear el recordatorio.' };
     }
+
+    return {
+      ok:               true,
+      creado:           true,
+      mensaje:          'Recordatorio creado.',
+      datos: {
+        recordatorio_id:   resultado.recordatorio.id,
+        titulo:            resultado.recordatorio.titulo,
+        fecha_vencimiento: resultado.recordatorio.fecha_vencimiento,
+        hora_vencimiento:  horaFinal,
+      },
+      choques_cercanos: avisoCercanos,
+    };
   }
 
   if (name === 'listar_recordatorios') {
@@ -362,43 +399,6 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
     }
 
     return { ok: true, mensaje: 'Recordatorio eliminado.' };
-  }
-
-  if (name === 'verificar_choque_horario') {
-    const supabase = getSupabase();
-
-    // Normalizar hora a HH:MM:SS
-    const horaStr = String(input.hora_vencimiento).trim();
-    const regexHora = /^([01]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/;
-    if (!regexHora.test(horaStr)) {
-      return { ok: false, mensaje: 'Formato de hora inválido' };
-    }
-    const horaFinal = horaStr.length === 5 ? `${horaStr}:00` : horaStr;
-
-    const { data, error } = await supabase.rpc('verificar_choque_recordatorio', {
-      p_empresa_id: empresa_id,
-      p_fecha:      input.fecha_vencimiento,
-      p_hora:       horaFinal,
-    });
-
-    if (error) {
-      console.error('[ejecutarTool] Error verificar_choque:', error.message);
-      return { ok: false, mensaje: 'No pude verificar conflictos de horario.' };
-    }
-
-    const choques = (data || []).map(r => ({
-      id:                r.id,
-      titulo:            r.titulo,
-      fecha_vencimiento: r.fecha_vencimiento,
-      hora_vencimiento:  r.hora_vencimiento,
-      tipo_choque:       r.tipo_choque,
-    }));
-
-    return {
-      ok:      true,
-      mensaje: choques.length === 0 ? 'No hay choque de horario.' : `Hay ${choques.length} recordatorio${choques.length > 1 ? 's' : ''} en ese horario.`,
-      datos:   choques,
-    };
   }
 
   console.error('[ejecutarTool] Tool desconocida:', name);
