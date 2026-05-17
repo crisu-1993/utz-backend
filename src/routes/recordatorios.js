@@ -188,11 +188,26 @@ async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqu
   const supabase = getSupabase();
 
   try {
-    // Calcular hoy y el límite en timezone Santiago
+    // RAMA 1: Búsqueda específica con titulo_busqueda → usar RPC con unaccent.
+    // No aplica filtro de fecha (busca en toda la BD). Tolerante a acentos.
+    if (titulo_busqueda) {
+      const { data, error } = await supabase.rpc('buscar_recordatorios', {
+        p_empresa_id: empresa_id,
+        p_busqueda:   titulo_busqueda,
+        p_completado: completado !== undefined ? completado : null,
+      });
+
+      if (error) throw new Error(error.message);
+
+      return { ok: true, recordatorios: data || [] };
+    }
+
+    // RAMA 2: Listado abierto (sin titulo_busqueda) → filtro próximos 3 días.
+    // Mantener lógica original con .or() para timezone Santiago.
     const hoyStr    = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
     const hoyMs     = new Date(hoyStr + 'T00:00:00Z').getTime();
     const limiteMs  = hoyMs + dias_adelante * 86400000;
-    const limiteStr = new Date(limiteMs).toISOString().slice(0, 10); // YYYY-MM-DD
+    const limiteStr = new Date(limiteMs).toISOString().slice(0, 10);
 
     let query = supabase
       .from('recordatorios')
@@ -201,10 +216,6 @@ async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqu
       .or(`fecha_vencimiento.is.null,fecha_vencimiento.lte.${limiteStr}`)
       .order('fecha_vencimiento', { ascending: true, nullsFirst: true })
       .limit(10);
-
-    if (titulo_busqueda) {
-      query = query.ilike('titulo', `%${titulo_busqueda}%`);
-    }
 
     if (completado !== undefined) {
       query = query.eq('completado', completado);
