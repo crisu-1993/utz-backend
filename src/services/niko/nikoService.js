@@ -468,7 +468,10 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
                   type:        'tool_result',
                   tool_use_id: toolUseBlock.id,
                   content:     toolResult.ok
-                    ? toolResult.mensaje
+                    ? JSON.stringify({
+                        mensaje: toolResult.mensaje,
+                        ...(toolResult.datos !== undefined && { datos: toolResult.datos }),
+                      })
                     : `Error: ${toolResult.mensaje}`,
                 },
               ],
@@ -722,7 +725,10 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
                   type:        'tool_result',
                   tool_use_id: toolUseBlock.id,
                   content:     toolResult.ok
-                    ? toolResult.mensaje
+                    ? JSON.stringify({
+                        mensaje: toolResult.mensaje,
+                        ...(toolResult.datos !== undefined && { datos: toolResult.datos }),
+                      })
                     : `Error: ${toolResult.mensaje}`,
                 },
               ],
