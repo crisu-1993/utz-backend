@@ -334,6 +334,7 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
 
   if (name === 'actualizar_recordatorio') {
     const { actualizarRecordatorio } = require('../../routes/recordatorios');
+    const supabase = getSupabase();
 
     const resultado = await actualizarRecordatorio({
       empresa_id,
@@ -349,10 +350,42 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
       return { ok: false, mensaje: resultado.mensaje || 'No pude actualizar el recordatorio' };
     }
 
+    // Verificar choques si el cambio modifica fecha, hora o reactiva el recordatorio
+    const cambioTemporal = input.fecha_vencimiento !== undefined ||
+                           input.hora_vencimiento !== undefined ||
+                           input.completado === false;
+
+    let choquesAviso = null;
+
+    if (cambioTemporal && resultado.recordatorio) {
+      const fechaFinal = resultado.recordatorio.fecha_vencimiento;
+      const horaFinal  = resultado.recordatorio.hora_vencimiento;
+
+      if (fechaFinal && horaFinal) {
+        const { data: choquesData, error: choquesError } = await supabase.rpc(
+          'verificar_choque_recordatorio',
+          {
+            p_empresa_id: empresa_id,
+            p_fecha:      fechaFinal,
+            p_hora:       horaFinal,
+          }
+        );
+
+        if (!choquesError && choquesData && choquesData.length > 0) {
+          // Filtrar el propio recordatorio que se está actualizando
+          const choquesFiltrados = choquesData.filter(c => c.id !== input.id);
+          if (choquesFiltrados.length > 0) {
+            choquesAviso = choquesFiltrados;
+          }
+        }
+      }
+    }
+
     return {
       ok:      true,
       mensaje: 'Recordatorio actualizado correctamente.',
       datos:   resultado.recordatorio,
+      choques: choquesAviso,
     };
   }
 
@@ -506,7 +539,8 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
                   content:     toolResult.ok
                     ? JSON.stringify({
                         mensaje: toolResult.mensaje,
-                        ...(toolResult.datos !== undefined && { datos: toolResult.datos }),
+                        ...(toolResult.datos   !== undefined && { datos:   toolResult.datos   }),
+                        ...(toolResult.choques !== undefined && { choques: toolResult.choques }),
                       })
                     : `Error: ${toolResult.mensaje}`,
                 },
@@ -763,7 +797,8 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
                   content:     toolResult.ok
                     ? JSON.stringify({
                         mensaje: toolResult.mensaje,
-                        ...(toolResult.datos !== undefined && { datos: toolResult.datos }),
+                        ...(toolResult.datos   !== undefined && { datos:   toolResult.datos   }),
+                        ...(toolResult.choques !== undefined && { choques: toolResult.choques }),
                       })
                     : `Error: ${toolResult.mensaje}`,
                 },
