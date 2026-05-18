@@ -411,6 +411,119 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
   };
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// SUPERVISOR ANTI-ALUCINACIÓN DE EJECUCIÓN DE TOOLS
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Niko a veces emite frases como "Listo, marqué X como hecho" sin
+// haber llamado la tool correspondiente. Estas 2 funciones detectan
+// esa alucinación y permiten gatillar un retry con tool_choice: any.
+//
+// detectarAccionConsumada: filtro rápido de texto (0 tokens, 0 latencia).
+// verificarAccionEnBD: verdad absoluta consultando Supabase (~50ms).
+
+/**
+ * Detecta si la respuesta de Niko afirma haber ejecutado una acción
+ * de recordatorio (marcar, eliminar, crear, actualizar, reactivar).
+ * Solo activa si el turno anterior del assistant fue una pregunta de
+ * confirmación tipo "¿Confirmas que...?".
+ *
+ * @param {string} textoRonda - Texto generado por Niko en este turno.
+ * @param {Array}  historial  - Historial de mensajes previos.
+ * @returns {object|null} { accion, titulo } si detecta alucinación potencial, null si no.
+ */
+function detectarAccionConsumada(textoRonda, historial) {
+  if (!textoRonda || typeof textoRonda !== 'string') return null;
+
+  // Gate 1: el turno anterior debe haber sido una pregunta de confirmación
+  const ultimoAssistant = [...historial].reverse().find(m => m.role === 'assistant');
+  if (!ultimoAssistant) return null;
+  const textoPrevio = typeof ultimoAssistant.content === 'string'
+    ? ultimoAssistant.content
+    : (Array.isArray(ultimoAssistant.content)
+        ? ultimoAssistant.content.map(b => b.text || '').join(' ')
+        : '');
+  const fuePreguntaConfirmacion = /[¿?]confirmas?\b|¿confirmas/i.test(textoPrevio);
+  if (!fuePreguntaConfirmacion) return null;
+
+  // Gate 2: el texto actual debe contener una frase de acción consumada
+  const patrones = [
+    { regex: /listo,?\s+marqu[eé]/i,     accion: 'completar' },
+    { regex: /hecho,?\s+marqu[eé]/i,     accion: 'completar' },
+    { regex: /listo,?\s+complet[eé]/i,   accion: 'completar' },
+    { regex: /listo,?\s+elimin[eé]/i,    accion: 'eliminar'  },
+    { regex: /hecho,?\s+elimin[eé]/i,    accion: 'eliminar'  },
+    { regex: /listo,?\s+borr[eé]/i,      accion: 'eliminar'  },
+    { regex: /^borrado\s+/i,             accion: 'eliminar'  },
+    { regex: /listo,?\s+agend[eé]/i,     accion: 'crear'     },
+    { regex: /qued[oó]\s+agendado/i,     accion: 'crear'     },
+    { regex: /listo,?\s+actualic[eé]/i,  accion: 'actualizar'},
+    { regex: /hecho,?\s+actualic[eé]/i,  accion: 'actualizar'},
+    { regex: /listo,?\s+reactiv[eé]/i,   accion: 'reactivar' },
+  ];
+
+  for (const { regex, accion } of patrones) {
+    if (regex.test(textoRonda)) {
+      // Extraer título mencionado (best-effort: primer texto en negritas)
+      const matchTitulo = textoRonda.match(/\*\*([^*]+)\*\*/);
+      const titulo = matchTitulo ? matchTitulo[1].trim() : null;
+      return { accion, titulo };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Verifica en Supabase si la acción que Niko dice haber ejecutado
+ * realmente ocurrió en BD en los últimos 10 segundos.
+ *
+ * @param {string} empresa_id
+ * @param {string} accion - 'completar' | 'eliminar' | 'crear' | 'actualizar' | 'reactivar'
+ * @param {string} titulo - Título del recordatorio mencionado por Niko
+ * @returns {Promise<boolean>} true si la acción ocurrió, false si no
+ */
+async function verificarAccionEnBD(empresa_id, accion, titulo) {
+  if (!empresa_id || !titulo) return false;
+
+  const supabase = getSupabase();
+  const haceDiezSegundos = new Date(Date.now() - 10000).toISOString();
+
+  try {
+    if (accion === 'eliminar') {
+      const { data, error } = await supabase
+        .from('recordatorios')
+        .select('id')
+        .eq('empresa_id', empresa_id)
+        .ilike('titulo', titulo)
+        .limit(1);
+      if (error) return true; // En duda, asumir OK para no spamear retries
+      return !data || data.length === 0;
+    }
+
+    const { data, error } = await supabase
+      .from('recordatorios')
+      .select('id, completado, updated_at, created_at')
+      .eq('empresa_id', empresa_id)
+      .ilike('titulo', titulo)
+      .gte('updated_at', haceDiezSegundos)
+      .limit(1);
+
+    if (error) return true;
+    if (!data || data.length === 0) return false;
+
+    const rec = data[0];
+    if (accion === 'completar')  return rec.completado === true;
+    if (accion === 'reactivar')  return rec.completado === false;
+    if (accion === 'crear')      return rec.created_at >= haceDiezSegundos;
+    if (accion === 'actualizar') return rec.updated_at >= haceDiezSegundos;
+    return true;
+  } catch (err) {
+    console.error('[supervisor] Error verificando BD:', err.message);
+    return true; // En duda, asumir OK
+  }
+}
+
 // ─── Detector de intención de recordatorio ────────────────────────────────────
 //
 // Devuelve true SOLO cuando tiene sentido forzar tool_choice: { type: 'any' }
@@ -816,8 +929,7 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
     for await (const event of stream1) {
       if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
         const chunk = event.delta.text;
-        textoRonda1 += chunk;
-        emit('delta', { texto: chunk });
+        textoRonda1 += chunk; // buffered — se emite tras validación del supervisor
       }
     }
 
@@ -846,6 +958,70 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
       return;
     }
     throw err;
+  }
+
+  // ── 6b. SUPERVISOR ANTI-ALUCINACIÓN ──────────────────────────────────────
+  // Si Claude terminó con end_turn pero el texto suena como si hubiera
+  // ejecutado una tool, verificamos en BD. Si la BD no refleja el cambio,
+  // reintentamos con tool_choice: any para forzar la tool real.
+  // El supervisor va ANTES del bloque tool_use para que, si el retry
+  // retorna tool_use, el bloque de abajo lo procese normalmente.
+  if (finalMsg1.stop_reason === 'end_turn') {
+    const sospecha = detectarAccionConsumada(textoRonda1, historial || []);
+
+    if (sospecha) {
+      console.log('[supervisor] Posible alucinación detectada:', sospecha);
+      const accionReal = await verificarAccionEnBD(empresa_id, sospecha.accion, sospecha.titulo);
+
+      if (!accionReal) {
+        console.log('[supervisor] BD desmiente a Niko. Reintentando con tool_choice: any');
+        toolsUsadas.push('_supervisor_retry');
+
+        try {
+          const stream1Retry = anthropic.messages.stream({
+            model:      MODEL,
+            max_tokens: 2000,
+            system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
+            tools:      NIKO_TOOLS,
+            tool_choice: { type: 'any' },
+            messages:   [
+              ...(historial || []),
+              { role: 'user', content: mensaje },
+            ],
+          });
+
+          // Consumir el stream sin re-emitir (ya se emitió el texto de ronda 1)
+          for await (const _event of stream1Retry) { /* vacío intencional */ }
+
+          const finalMsg1Retry = await stream1Retry.finalMessage();
+          totalInput  += finalMsg1Retry.usage?.input_tokens  || 0;
+          totalOutput += finalMsg1Retry.usage?.output_tokens || 0;
+          console.log('[supervisor] Retry stop_reason:', finalMsg1Retry.stop_reason);
+
+          if (finalMsg1Retry.stop_reason === 'tool_use') {
+            // Buffer descartado (textoRonda1 = '') — ronda 2 emitirá la respuesta real
+            finalMsg1 = finalMsg1Retry;
+            textoRonda1 = ''; // descartar buffer: el if(textoRonda1) posterior no emitirá nada
+          } else {
+            console.log('[supervisor] Retry tampoco llamó tool. Devolviendo mensaje amigable.');
+            const mensajeAmigable = 'Disculpa, se me trabó algo procesando eso. ¿Puedes intentar de nuevo?';
+            emit('delta', { texto: mensajeAmigable });
+            persistirYTerminar({ respuesta: mensajeAmigable, eerrAmpliado: false, saturado: false });
+            return;
+          }
+        } catch (retryErr) {
+          console.error('[supervisor] Error en retry:', retryErr.message);
+          // Degradación graceful: dejar pasar la respuesta original
+        }
+      } else {
+        console.log('[supervisor] BD confirma la acción. Niko no alucinó.');
+      }
+    }
+  }
+
+  // Emitir buffer de ronda 1 si tiene contenido y no fue descartado por el supervisor
+  if (textoRonda1) {
+    emit('delta', { texto: textoRonda1 });
   }
 
   // ── 7. Tool calling si Claude lo pidió ───────────────────────────────────
