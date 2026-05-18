@@ -411,6 +411,81 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
   };
 }
 
+// ─── Detector de intención de recordatorio ────────────────────────────────────
+//
+// Devuelve true si el mensaje del usuario tiene intención clara de
+// crear/listar/editar/completar/eliminar/reactivar un recordatorio.
+// Cuando devuelve true, se fuerza tool_choice: { type: 'any' } en Ronda 1
+// para garantizar que Claude llame una tool en lugar de responder con texto.
+
+function detectarIntencionRecordatorio(mensaje, historial) {
+  if (!mensaje) return false;
+
+  const msgLower = mensaje.toLowerCase().trim();
+
+  // Patrones explícitos de recordatorio
+  const patronesRecordatorio = [
+    // Crear
+    /\bagenda\b/i,
+    /\bagendá\b/i,
+    /\bagendar\b/i,
+    /\brecuérdame\b/i,
+    /\brecordame\b/i,
+    /\brecuerdame\b/i,
+    /\bponme un recordatorio\b/i,
+    /\banota que\b/i,
+    /\bno me dejes olvidar\b/i,
+    /\bno olvides recordarme\b/i,
+
+    // Listar
+    /\bqué tengo agendado\b/i,
+    /\bqué recordatorios\b/i,
+    /\bmuéstrame los pendientes\b/i,
+    /\bque tengo pendiente\b/i,
+    /\blistame los recordatorios\b/i,
+
+    // Actualizar / Completar
+    /\bcompleta\b.{0,30}\brecordatorio\b/i,
+    /\bmarca\b.{0,15}\b(como )?hecho\b/i,
+    /\bmarca\b.{0,15}\bcompletado\b/i,
+    /\bcambia\b.{0,20}\bhora\b/i,
+    /\bmueve\b.{0,30}(al|para|el)\b/i,
+
+    // Eliminar
+    /\bborra\b.{0,30}\brecordatorio\b/i,
+    /\belimina\b.{0,30}\brecordatorio\b/i,
+    /\bsaca\b.{0,30}\brecordatorio\b/i,
+
+    // Reactivar
+    /\breactiva\b/i,
+    /\breactivar\b/i,
+    /\bvuelve a poner pendiente\b/i,
+    /\bmarca\b.{0,15}\bno completado\b/i,
+  ];
+
+  if (patronesRecordatorio.some(p => p.test(msgLower))) {
+    return true;
+  }
+
+  // Caso especial: el assistant terminó con pregunta sobre descripción, hora o fecha
+  // y el usuario respondió. En ese caso Niko debe llamar crear_recordatorio, no texto.
+  if (historial && historial.length > 0) {
+    const ultimoAssistant = [...historial].reverse().find(m => m.role === 'assistant');
+    if (ultimoAssistant && typeof ultimoAssistant.content === 'string') {
+      const ultimoTextoAssistant = ultimoAssistant.content.toLowerCase();
+      const preguntaDescripcion = /agregamos.{0,15}(descripción|descripcion|nota)/.test(ultimoTextoAssistant);
+      const preguntaHora        = /\b9am\b|preferencia.{0,15}hora|qué hora|que hora/.test(ultimoTextoAssistant);
+      const preguntaFecha       = /qué fecha|que fecha|para cuándo|para cuando|qué día|que día/.test(ultimoTextoAssistant);
+
+      if (preguntaDescripcion || preguntaHora || preguntaFecha) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 /**
  * Envía un mensaje a Niko y devuelve su respuesta.
  *
@@ -479,6 +554,9 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
   // ── 6. Llamar a Claude (primera ronda, con tools) ────────────────────────
   const anthropic = new Anthropic();
 
+  const intencionRecordatorio_R1 = detectarIntencionRecordatorio(mensaje, historial);
+  console.log('[chatWithNiko] intencionRecordatorio:', intencionRecordatorio_R1, '| tool_choice:', intencionRecordatorio_R1 ? 'any' : 'auto');
+
   let response;
   try {
     response = await anthropic.messages.create({
@@ -486,6 +564,7 @@ async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
       max_tokens: 2000,
       system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
       tools:      NIKO_TOOLS,
+      ...(intencionRecordatorio_R1 && { tool_choice: { type: 'any' } }),
       messages:   [
         ...(historial || []),
         { role: 'user', content: mensaje },
@@ -716,12 +795,16 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
   };
 
   // ── 6. RONDA 1: stream con tools ─────────────────────────────────────────
+  const intencionRecordatorio_Stream = detectarIntencionRecordatorio(mensaje, historial);
+  console.log('[chatWithNikoStream] intencionRecordatorio:', intencionRecordatorio_Stream, '| tool_choice:', intencionRecordatorio_Stream ? 'any' : 'auto');
+
   try {
     const stream1 = anthropic.messages.stream({
       model:      MODEL,
       max_tokens: 2000,
       system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
       tools:      NIKO_TOOLS,
+      ...(intencionRecordatorio_Stream && { tool_choice: { type: 'any' } }),
       messages:   [
         ...(historial || []),
         { role: 'user', content: mensaje },
