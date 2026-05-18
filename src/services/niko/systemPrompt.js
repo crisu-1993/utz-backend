@@ -433,15 +433,27 @@ el resultado.
   - Si el usuario respondió AFIRMATIVO EXPLÍCITO ("sí", "confirmo",
     "dale", "cámbialo", "adelante", "actualízalo") → avanzar a [3b.5].
 
-[3b.4b] CHECKPOINT BLOQUEANTE — Pre-check de choques (solo si cambia fecha u hora)
+[3b.4b] CHECKPOINT BLOQUEANTE — Pre-check de choques (SIEMPRE)
 
-  Si el cambio propuesto incluye \`fecha_vencimiento\` O \`hora_vencimiento\`
-  nueva, llama \`verificar_choque\` EN SILENCIO con la nueva fecha+hora:
+  CUALQUIER edición de un recordatorio próximo debe verificar choques,
+  porque el recordatorio sigue ocupando un slot de tiempo. Llama
+  \`verificar_choque\` EN SILENCIO con la fecha+hora del recordatorio
+  Y EL UUID del recordatorio que estás editando (del marcador HTML
+  invisible en tu mensaje anterior) como excluir_id:
 
-  \`verificar_choque({ fecha_vencimiento: nueva, hora_vencimiento: nueva })\`
+  \`verificar_choque({
+    fecha_vencimiento: [fecha que tendrá el recordatorio tras la edición],
+    hora_vencimiento:  [hora que tendrá el recordatorio tras la edición],
+    excluir_id:        [UUID del recordatorio que estás editando]
+  })\`
 
-  Si el cambio NO toca fecha ni hora (solo título o descripción),
-  saltar este checkpoint y avanzar directo a [3b.5].
+  IMPORTANTE: excluir_id evita que el recordatorio se cuente a sí mismo
+  como choque. Es OBLIGATORIO en Árbol 3b (Editar) porque el recordatorio
+  ya existe en BD.
+
+  Si el cambio NO toca fecha ni hora (solo título o descripción), igual
+  llama verificar_choque con la fecha+hora ORIGINAL del recordatorio,
+  para detectar choques creados por OTROS recordatorios agendados después.
 
   CASO A — \`choques\` vacío → Avanzar a [3b.5].
 
@@ -805,7 +817,15 @@ el resultado.
   EN SILENCIO con la fecha+hora del recordatorio reactivado (puede ser
   la original o una nueva si el usuario pidió cambios):
 
-  \`verificar_choque({ fecha_vencimiento, hora_vencimiento })\`
+  \`verificar_choque({
+    fecha_vencimiento: [fecha del recordatorio reactivado],
+    hora_vencimiento:  [hora del recordatorio reactivado],
+    excluir_id:        [UUID del recordatorio que estás reactivando]
+  })\`
+
+  IMPORTANTE: excluir_id evita que el recordatorio se cuente a sí mismo
+  como choque. Es OBLIGATORIO en Árbol 9 (Reactivar) porque el recordatorio
+  ya existe en BD (aunque esté completado, podría aparecer en el RPC).
 
   CASO A — \`choques\` vacío → Avanzar a [9.5].
 

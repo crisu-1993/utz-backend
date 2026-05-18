@@ -178,7 +178,9 @@ const NIKO_TOOLS = [
       + 'Solo lectura — NO crea ni modifica nada. Cada item del array choques '
       + 'incluye: id, titulo, fecha_vencimiento, hora_vencimiento, tipo_choque '
       + '("exacto" o "cercano"). Úsala ANTES de crear_recordatorio o '
-      + 'actualizar_recordatorio para saber si hay conflicto de horario.',
+      + 'actualizar_recordatorio para saber si hay conflicto de horario. '
+      + 'Si pasas excluir_id, el recordatorio con ese id será filtrado del '
+      + 'resultado (útil al editar o reactivar para evitar auto-choque).',
     input_schema: {
       type: 'object',
       properties: {
@@ -189,6 +191,13 @@ const NIKO_TOOLS = [
         hora_vencimiento: {
           type: 'string',
           description: 'Hora en formato HH:MM (24h)',
+        },
+        excluir_id: {
+          type: 'string',
+          description: 'UUID opcional del recordatorio a excluir del resultado. '
+            + 'Úsalo cuando estás EDITANDO o REACTIVANDO un recordatorio existente '
+            + 'para que NO se cuente a sí mismo como choque. Para CREAR un '
+            + 'recordatorio nuevo, omite este parámetro.',
         },
       },
       required: ['fecha_vencimiento', 'hora_vencimiento'],
@@ -452,7 +461,13 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
       return { ok: false, mensaje: 'No pude verificar choques: ' + error.message };
     }
 
-    return { ok: true, choques: data || [] };
+    let choquesFiltrados = data || [];
+    if (input.excluir_id) {
+      choquesFiltrados = choquesFiltrados.filter(c => c.id !== input.excluir_id);
+      console.log('[ejecutarTool] verificar_choque: filtrado excluir_id=' + input.excluir_id
+        + ' (de ' + (data || []).length + ' a ' + choquesFiltrados.length + ' items)');
+    }
+    return { ok: true, choques: choquesFiltrados };
   }
 
   console.error('[ejecutarTool] Tool desconocida:', name);
