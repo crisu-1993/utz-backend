@@ -413,30 +413,44 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
 
 // ─── Detector de intención de recordatorio ────────────────────────────────────
 //
-// Devuelve true si el mensaje del usuario tiene intención clara de
-// crear/listar/editar/completar/eliminar/reactivar un recordatorio.
-// Cuando devuelve true, se fuerza tool_choice: { type: 'any' } en Ronda 1
-// para garantizar que Claude llame una tool en lugar de responder con texto.
-
+// Devuelve true SOLO cuando tiene sentido forzar tool_choice: { type: 'any' }
+// en Ronda 1 de Claude.
+//
+// Lógica:
+// - CASO 1 (prioritario): Niko terminó el turno anterior con pregunta intermedia
+//   (descripción, hora, fecha). La respuesta del usuario debe disparar la tool
+//   directamente, sin esperar otra pregunta. Esto cubre el flujo de CREAR
+//   correctamente: Niko pregunta → usuario responde → se fuerza la tool.
+//
+// - CASO 2: Operaciones CRUD (borrar, completar, editar, reactivar, mover) y
+//   listar → forzar tool siempre porque no requieren preguntas previas.
+//
+// - CASO crear (sin pregunta previa): NO forzar tool. Niko debe preguntar
+//   descripción ANTES de crear. El forzado ocurre en el turno siguiente (CASO 1).
+//
 function detectarIntencionRecordatorio(mensaje, historial) {
   if (!mensaje) return false;
 
   const msgLower = mensaje.toLowerCase().trim();
 
-  // Patrones explícitos de recordatorio
-  const patronesRecordatorio = [
-    // Crear
-    /\bagenda\b/i,
-    /\bagendá\b/i,
-    /\bagendar\b/i,
-    /\brecuérdame\b/i,
-    /\brecordame\b/i,
-    /\brecuerdame\b/i,
-    /\bponme un recordatorio\b/i,
-    /\banota que\b/i,
-    /\bno me dejes olvidar\b/i,
-    /\bno olvides recordarme\b/i,
+  // ─── CASO 1: respuesta a pregunta intermedia de Niko ─────────────────────
+  // Es el caso PRIORITARIO porque cubre el flujo correcto de creación.
+  if (historial && historial.length > 0) {
+    const ultimoAssistant = [...historial].reverse().find(m => m.role === 'assistant');
+    if (ultimoAssistant && typeof ultimoAssistant.content === 'string') {
+      const ultimoTextoAssistant = ultimoAssistant.content.toLowerCase();
+      const preguntaDescripcion = /agregamos.{0,15}(descripción|descripcion|nota)/.test(ultimoTextoAssistant);
+      const preguntaHora        = /\b9am\b|preferencia.{0,15}hora|qué hora|que hora/.test(ultimoTextoAssistant);
+      const preguntaFecha       = /qué fecha|que fecha|para cuándo|para cuando|qué día|que día/.test(ultimoTextoAssistant);
 
+      if (preguntaDescripcion || preguntaHora || preguntaFecha) {
+        return true;
+      }
+    }
+  }
+
+  // ─── CASO 2: operaciones CRUD y listar (no requieren preguntas previas) ──
+  const patronesCRUDyListar = [
     // Listar
     /\bqué tengo agendado\b/i,
     /\bqué recordatorios\b/i,
@@ -463,26 +477,14 @@ function detectarIntencionRecordatorio(mensaje, historial) {
     /\bmarca\b.{0,15}\bno completado\b/i,
   ];
 
-  if (patronesRecordatorio.some(p => p.test(msgLower))) {
+  if (patronesCRUDyListar.some(p => p.test(msgLower))) {
     return true;
   }
 
-  // Caso especial: el assistant terminó con pregunta sobre descripción, hora o fecha
-  // y el usuario respondió. En ese caso Niko debe llamar crear_recordatorio, no texto.
-  if (historial && historial.length > 0) {
-    const ultimoAssistant = [...historial].reverse().find(m => m.role === 'assistant');
-    if (ultimoAssistant && typeof ultimoAssistant.content === 'string') {
-      const ultimoTextoAssistant = ultimoAssistant.content.toLowerCase();
-      const preguntaDescripcion = /agregamos.{0,15}(descripción|descripcion|nota)/.test(ultimoTextoAssistant);
-      const preguntaHora        = /\b9am\b|preferencia.{0,15}hora|qué hora|que hora/.test(ultimoTextoAssistant);
-      const preguntaFecha       = /qué fecha|que fecha|para cuándo|para cuando|qué día|que día/.test(ultimoTextoAssistant);
-
-      if (preguntaDescripcion || preguntaHora || preguntaFecha) {
-        return true;
-      }
-    }
-  }
-
+  // ─── CASO crear (sin pregunta previa) ────────────────────────────────────
+  // Verbos de crear (agenda, recuérdame, etc) SE DETECTAN pero NO fuerzan tool.
+  // Niko responderá con auto y preguntará lo que falte. El forzado ocurre en
+  // el turno siguiente cuando el usuario responda la pregunta (CASO 1).
   return false;
 }
 
