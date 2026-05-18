@@ -171,6 +171,29 @@ const NIKO_TOOLS = [
       required: ['id'],
     },
   },
+  {
+    name: 'verificar_choque',
+    description: 'Verifica si hay otro recordatorio pendiente en la misma '
+      + 'fecha+hora (choque exacto) o dentro de ±30 minutos (choque cercano). '
+      + 'Solo lectura — NO crea ni modifica nada. Cada item del array choques '
+      + 'incluye: id, titulo, fecha_vencimiento, hora_vencimiento, tipo_choque '
+      + '("exacto" o "cercano"). Úsala ANTES de crear_recordatorio o '
+      + 'actualizar_recordatorio para saber si hay conflicto de horario.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        fecha_vencimiento: {
+          type: 'string',
+          description: 'Fecha en formato YYYY-MM-DD',
+        },
+        hora_vencimiento: {
+          type: 'string',
+          description: 'Hora en formato HH:MM (24h)',
+        },
+      },
+      required: ['fecha_vencimiento', 'hora_vencimiento'],
+    },
+  },
 ];
 
 function getSupabase() {
@@ -402,6 +425,34 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
     }
 
     return { ok: true, mensaje: 'Recordatorio eliminado.' };
+  }
+
+  if (name === 'verificar_choque') {
+    const supabase = getSupabase();
+
+    // Normalizar hora: aceptar HH:MM o HH:MM:SS
+    const horaSQL = /^\d{2}:\d{2}$/.test(input.hora_vencimiento)
+      ? input.hora_vencimiento + ':00'
+      : input.hora_vencimiento;
+
+    console.log('[ejecutarTool] verificar_choque:', {
+      empresa_id,
+      fecha: input.fecha_vencimiento,
+      hora:  horaSQL,
+    });
+
+    const { data, error } = await supabase.rpc('verificar_choque_recordatorio', {
+      p_empresa_id: empresa_id,
+      p_fecha:      input.fecha_vencimiento,
+      p_hora:       horaSQL,
+    });
+
+    if (error) {
+      console.error('[ejecutarTool] Error verificar_choque:', error.message);
+      return { ok: false, mensaje: 'No pude verificar choques: ' + error.message };
+    }
+
+    return { ok: true, choques: data || [] };
   }
 
   console.error('[ejecutarTool] Tool desconocida:', name);
