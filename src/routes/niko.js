@@ -13,6 +13,12 @@ const { createClient }           = require('@supabase/supabase-js');
 const { authMiddleware }         = require('../middleware/auth');
 const { chatWithNikoStream }     = require('../services/niko/nikoService');
 const { detectarDiagnostico }    = require('./categorias');
+const {
+  obtenerRequestId,
+  verificarOMarcar,
+  marcarFinalizado,
+  limpiarEntrada,
+} = require('../middleware/idempotencia');
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -62,6 +68,19 @@ function plantillaRecordatorio(numero, datos) {
 //   event: error      → { error: string }           (error catastrófico)
 router.post('/chat', authMiddleware, async (req, res) => {
   const { empresa_id, user_id } = req.auth;
+
+  // ─── Idempotencia ──────────────────────────────────────────────────────────
+  const requestId = obtenerRequestId(req);
+  console.log('[idempotencia] POST /api/niko/chat | requestId:', requestId || '(sin id)');
+
+  if (requestId) {
+    const check = verificarOMarcar(requestId);
+    if (check.duplicado) {
+      console.log('[idempotencia] Request DUPLICADO ignorado:', requestId, '| enCurso:', check.enCurso);
+      return res.status(204).end();
+    }
+  }
+
   const { mensaje, historial: rawHistorial } = req.body || {};
 
   // ── Validaciones (JSON, antes de SSE headers) ──────────────────────────────
@@ -135,7 +154,9 @@ router.post('/chat', authMiddleware, async (req, res) => {
 
   try {
     await chatWithNikoStream({ mensaje: mensajeTrimmed, historial, empresa_id, user_id }, emit);
+    if (requestId) marcarFinalizado(requestId);
   } catch (err) {
+    if (requestId) limpiarEntrada(requestId);
     console.error('[niko] Error catastrófico en POST /chat:', err.message);
     emit('error', { error: err.message || 'Error interno al procesar el mensaje' });
   } finally {
