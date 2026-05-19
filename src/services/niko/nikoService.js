@@ -1019,8 +1019,11 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
     }
   }
 
-  // Emitir buffer de ronda 1 si tiene contenido y no fue descartado por el supervisor
-  if (textoRonda1) {
+  // Emitir buffer de ronda 1 SOLO si no se va a llamar tool en Ronda 2.
+  // Si hay tool_use, el texto pre-tool es un "borrador" que Ronda 2 regenera.
+  // Esto evita doble render (Bug 1) y también filtra verbalizaciones de
+  // proceso interno (Bug 2). Documentado en diseño multi-agente Check 2.
+  if (textoRonda1 && finalMsg1.stop_reason !== 'tool_use') {
     emit('delta', { texto: textoRonda1 });
   }
 
