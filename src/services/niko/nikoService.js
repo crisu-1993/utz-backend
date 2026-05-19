@@ -1015,299 +1015,142 @@ async function supervisorLLM({ accion, toolsUsadas, textoCandidato, iteracion = 
 //   (en saturación: delta con plantilla + done con saturado:true)
 
 async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, emit) {
-  const inicio    = Date.now();
-  const supabase  = getSupabase();
+  const inicio   = Date.now();
+  const supabase = getSupabase();
 
-  // ── 1. Cargar datos de la empresa ─────────────────────────────────────────
-  const { data, error } = await supabase
+  // ────────────────────────────────────────────────────────────
+  // ETAPA 0 — Preparación
+  // ────────────────────────────────────────────────────────────
+
+  const { data: empresa, error: empresaError } = await supabase
     .from('empresas')
     .select('nombre, giro, representante_nombre, representante_rol, tratamiento')
     .eq('id', empresa_id)
     .maybeSingle();
 
-  if (error) {
-    console.error(`[chatWithNikoStream] Error query empresa ${empresa_id}:`, error.message);
+  if (empresaError) {
+    console.error(`[chatWithNikoStream] Error query empresa ${empresa_id}:`, empresaError.message);
     throw new Error('No se pudieron cargar los datos de la empresa');
   }
-  if (!data) {
+  if (!empresa) {
     console.error(`[chatWithNikoStream] Empresa no encontrada: ${empresa_id}`);
     throw new Error('Empresa no encontrada');
   }
 
-  // ── 2. Mapear datos con fallbacks seguros ─────────────────────────────────
-  const nombreEmpresa = data.nombre               || 'tu empresa';
-  const rubro         = data.giro                 || 'su rubro';
-  const nombreCliente = data.representante_nombre || 'cliente';
-  const rolCliente    = data.representante_rol    || 'dueño/a';
-  const tratamiento   = data.tratamiento          || 'tu';
+  const empresa_context = {
+    nombre:        empresa.nombre               || 'tu empresa',
+    giro:          empresa.giro                 || 'su rubro',
+    representante: empresa.representante_nombre || 'jefe',
+    rol:           empresa.representante_rol    || 'dueño/a',
+    tratamiento:   empresa.tratamiento          || 'tu',
+  };
 
-  // ── 3. Obtener contexto financiero ────────────────────────────────────────
-  let contextoFinanciero = null;
+  let contexto_financiero = null;
   try {
-    contextoFinanciero = await obtenerContextoFinanciero(empresa_id);
+    contexto_financiero = await obtenerContextoFinanciero(empresa_id);
   } catch (errCtx) {
     console.error('[chatWithNikoStream] Error cargando contexto financiero:', errCtx.message);
   }
 
-  // ── 4-5. Construir system prompt ──────────────────────────────────────────
-  const systemPromptBase = buildSystemPrompt({
-    nombreCliente,
-    rolCliente,
-    nombreEmpresa,
-    rubro,
-    tratamiento,
-  });
+  // ────────────────────────────────────────────────────────────
+  // ETAPA 1 — Detectar estado del TXN del historial
+  // ────────────────────────────────────────────────────────────
 
-  const tieneContexto = contextoFinanciero && (
-    contextoFinanciero.resumenes_por_mes?.length > 0        ||
-    contextoFinanciero.datos_manuales?.length > 0           ||
-    contextoFinanciero.patrones_pendientes?.length > 0      ||
-    contextoFinanciero.reglas_activas?.length > 0           ||
-    contextoFinanciero.es_primera_sesion === true
-  );
-  const systemPromptFinal = tieneContexto
-    ? systemPromptBase + '\n\n## CONTEXTO FINANCIERO ACTUAL\n\n' + formatearContexto(contextoFinanciero)
-    : systemPromptBase;
+  let txnId      = markers.extraerTxnActivo(historial);
+  let steps      = txnId ? markers.extraerStepsDelTxn(historial, txnId) : [];
+  let nikoId     = txnId ? markers.extraerNikoIdUltimo(historial, txnId) : null;
+  let nikoList   = txnId ? markers.extraerNikoListUltimo(historial, txnId) : null;
+  let accionPrev = extraerAccionDelTxn(steps);
 
-  const anthropic = new Anthropic();
-
-  let textoRonda1   = '';
-  let textoRonda2   = '';
-  let finalMsg1     = null;
-  let modeloUsado   = MODEL;
-  let totalInput    = 0;
-  let totalOutput   = 0;
-  const toolsUsadas = [];
-
-  // Helper interno: persistir assistant + emitir done, luego retornar
-  const persistirYTerminar = ({ respuesta, eerrAmpliado, saturado }) => {
-    const tokens_usados = totalInput + totalOutput;
-    const latencia_ms   = Date.now() - inicio;
-
-    emit('done', {
-      respuesta,
-      eerr_ampliado_recien_revelado: eerrAmpliado,
-      meta: { modelo_usado: modeloUsado, tokens_usados, tools_usadas: toolsUsadas },
-      saturado,
-    });
-
-    // Fire-and-forget: persistir respuesta del assistant
-    supabase.from('niko_conversaciones').insert({
-      empresa_id,
-      user_id,
-      rol:             'assistant',
-      mensaje:         respuesta,
-      tools_invocadas: toolsUsadas,
-      tokens_usados,
-      modelo_usado:    modeloUsado,
-      latencia_ms,
-    }).then(({ error: e }) => {
-      if (e) console.error('[chatWithNikoStream] Error persistiendo assistant:', e.message);
-    });
-  };
-
-  // ── 6. RONDA 1: stream con tools ─────────────────────────────────────────
-  const intencionRecordatorio_Stream = detectarIntencionRecordatorio(mensaje, historial);
-  console.log('[chatWithNikoStream] intencionRecordatorio:', intencionRecordatorio_Stream, '| tool_choice:', intencionRecordatorio_Stream ? 'any' : 'auto');
-
-  try {
-    const stream1 = anthropic.messages.stream({
-      model:      MODEL,
-      max_tokens: 2000,
-      system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
-      tools:      NIKO_TOOLS,
-      ...(intencionRecordatorio_Stream && { tool_choice: { type: 'any' } }),
-      messages:   [
-        ...(historial || []),
-        { role: 'user', content: mensaje },
-      ],
-    });
-
-    for await (const event of stream1) {
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        const chunk = event.delta.text;
-        textoRonda1 += chunk; // buffered — se emite tras validación del supervisor
-      }
-    }
-
-    // finalMessage() ensamblada por el SDK: incluye tool_use con input completo
-    finalMsg1    = await stream1.finalMessage();
-    modeloUsado  = finalMsg1.model || MODEL;
-    totalInput  += finalMsg1.usage?.input_tokens  || 0;
-    totalOutput += finalMsg1.usage?.output_tokens || 0;
-
-    console.log('[chatWithNikoStream] Ronda 1 completa. stop_reason:', finalMsg1.stop_reason,
-      '| tokens ronda 1:', (finalMsg1.usage?.input_tokens || 0) + (finalMsg1.usage?.output_tokens || 0));
-    console.log('[chatWithNikoStream] Cache R1:', {
-      cache_creation: finalMsg1.usage?.cache_creation_input_tokens || 0,
-      cache_read:     finalMsg1.usage?.cache_read_input_tokens     || 0,
-      input_normal:   finalMsg1.usage?.input_tokens                || 0,
-      output:         finalMsg1.usage?.output_tokens               || 0,
-    });
-
-  } catch (err) {
-    if (esErrorSaturacion(err)) {
-      console.warn(`[chatWithNikoStream] Saturación ronda 1 (${err.status}).`);
-      const textoSat = mensajeSaturacionAleatorio();
-      toolsUsadas.push('_saturacion');
-      emit('delta', { texto: textoSat });
-      persistirYTerminar({ respuesta: textoSat, eerrAmpliado: false, saturado: true });
-      return;
-    }
-    throw err;
+  if (!txnId) {
+    txnId      = markers.generarTxnId();
+    steps      = [];
+    nikoId     = null;
+    nikoList   = null;
+    accionPrev = null;
   }
 
-  // ── 6b. SUPERVISOR ANTI-ALUCINACIÓN ──────────────────────────────────────
-  // Si Claude terminó con end_turn pero el texto suena como si hubiera
-  // ejecutado una tool, verificamos en BD. Si la BD no refleja el cambio,
-  // reintentamos con tool_choice: any para forzar la tool real.
-  // El supervisor va ANTES del bloque tool_use para que, si el retry
-  // retorna tool_use, el bloque de abajo lo procese normalmente.
-  if (finalMsg1.stop_reason === 'end_turn') {
-    const sospecha = detectarAccionConsumada(textoRonda1, historial || []);
+  console.log('[router] TXN:', txnId, '| steps:', steps.length, '| nikoId:', !!nikoId, '| accionPrev:', accionPrev);
 
-    if (sospecha) {
-      console.log('[supervisor] Posible alucinación detectada:', sospecha);
-      const accionReal = await verificarAccionEnBD(empresa_id, sospecha.accion, sospecha.titulo);
+  // ────────────────────────────────────────────────────────────
+  // ETAPA 2 — Routing (regex shortcut → Madre LLM si falla)
+  // ────────────────────────────────────────────────────────────
 
-      if (!accionReal) {
-        console.log('[supervisor] BD desmiente a Niko. Reintentando con tool_choice: any');
-        toolsUsadas.push('_supervisor_retry');
+  let routing = routingShortcut(mensaje, txnId, steps, nikoId, nikoList, accionPrev);
 
-        try {
-          const stream1Retry = anthropic.messages.stream({
-            model:      MODEL,
-            max_tokens: 2000,
-            system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
-            tools:      NIKO_TOOLS,
-            tool_choice: { type: 'any' },
-            messages:   [
-              ...(historial || []),
-              { role: 'user', content: mensaje },
-            ],
-          });
+  if (!routing || routing.confianza < 0.85) {
+    console.log('[router] Shortcut no decidió. Llamando Madre LLM...');
+    routing = await llamarMadreJSON({
+      mensaje, historial, txnId, steps, nikoId, nikoList, accion: accionPrev,
+    });
+  }
 
-          // Consumir el stream sin re-emitir (ya se emitió el texto de ronda 1)
-          for await (const _event of stream1Retry) { /* vacío intencional */ }
+  console.log('[router] Intent:', routing.intent, '| accion:', routing.accion, '| motivo:', routing.motivo);
 
-          const finalMsg1Retry = await stream1Retry.finalMessage();
-          totalInput  += finalMsg1Retry.usage?.input_tokens  || 0;
-          totalOutput += finalMsg1Retry.usage?.output_tokens || 0;
-          console.log('[supervisor] Retry stop_reason:', finalMsg1Retry.stop_reason);
+  // ────────────────────────────────────────────────────────────
+  // ETAPA 3 — Dispatch al agente correcto
+  // ────────────────────────────────────────────────────────────
 
-          if (finalMsg1Retry.stop_reason === 'tool_use') {
-            // Buffer descartado (textoRonda1 = '') — ronda 2 emitirá la respuesta real
-            finalMsg1 = finalMsg1Retry;
-            textoRonda1 = ''; // descartar buffer: el if(textoRonda1) posterior no emitirá nada
-          } else {
-            console.log('[supervisor] Retry tampoco llamó tool. Devolviendo mensaje amigable.');
-            const mensajeAmigable = 'Disculpa, se me trabó algo procesando eso. ¿Puedes intentar de nuevo?';
-            emit('delta', { texto: mensajeAmigable });
-            persistirYTerminar({ respuesta: mensajeAmigable, eerrAmpliado: false, saturado: false });
-            return;
-          }
-        } catch (retryErr) {
-          console.error('[supervisor] Error en retry:', retryErr.message);
-          // Degradación graceful: dejar pasar la respuesta original
-        }
-      } else {
-        console.log('[supervisor] BD confirma la acción. Niko no alucinó.');
-      }
+  let resultado;
+
+  switch (routing.intent) {
+
+    case 'crear':
+      resultado = await llamarAgente({
+        agenteModule: agenteCrear,
+        input: agenteCrear.construirInput({ mensaje, historial, txn_id: txnId, empresa_context }),
+        emit, empresa_id, user_id,
+      });
+      break;
+
+    case 'listar':
+      resultado = await llamarAgente({
+        agenteModule: agenteListar,
+        input: agenteListar.construirInput({ mensaje, historial, txn_id: txnId, empresa_context }),
+        emit, empresa_id, user_id,
+      });
+      break;
+
+    case 'conversacion': {
+      const ctxFinancieroTexto = contexto_financiero
+        ? formatearContexto(contexto_financiero)
+        : '';
+      resultado = await llamarAgente({
+        agenteModule: agenteConv,
+        input: agenteConv.construirInput({
+          mensaje, historial, txn_id: txnId, empresa_context,
+          contexto_financiero: ctxFinancieroTexto,
+        }),
+        emit, empresa_id, user_id,
+      });
+      break;
     }
+
+    case 'modificar':
+      resultado = await flujoModificar({
+        mensaje, historial, txnId, steps, nikoId, nikoList,
+        accion: routing.accion || accionPrev,
+        empresa_context, empresa_id, user_id, emit,
+      });
+      break;
+
+    default:
+      console.warn('[router] Intent desconocido:', routing.intent, '. Fallback a conversacion.');
+      resultado = await llamarAgente({
+        agenteModule: agenteConv,
+        input: agenteConv.construirInput({
+          mensaje, historial, txn_id: txnId, empresa_context,
+          contexto_financiero: contexto_financiero ? formatearContexto(contexto_financiero) : '',
+        }),
+        emit, empresa_id, user_id,
+      });
   }
 
-  // Emitir buffer de ronda 1 SOLO si no se va a llamar tool en Ronda 2.
-  // Si hay tool_use, el texto pre-tool es un "borrador" que Ronda 2 regenera.
-  // Esto evita doble render (Bug 1) y también filtra verbalizaciones de
-  // proceso interno (Bug 2). Documentado en diseño multi-agente Check 2.
-  if (textoRonda1 && finalMsg1.stop_reason !== 'tool_use') {
-    emit('delta', { texto: textoRonda1 });
-  }
+  // ────────────────────────────────────────────────────────────
+  // ETAPA 4 — Primera sesión (preservar lógica original)
+  // ────────────────────────────────────────────────────────────
 
-  // ── 7. Tool calling si Claude lo pidió ───────────────────────────────────
-  if (finalMsg1.stop_reason === 'tool_use') {
-    // El SDK ensambla el bloque tool_use completo (con input parseado) en finalMessage()
-    const toolUseBlock = finalMsg1.content.find(b => b.type === 'tool_use');
-
-    if (toolUseBlock) {
-      console.log('[chatWithNikoStream] Claude pidió tool:', toolUseBlock.name, '| id:', toolUseBlock.id);
-      toolsUsadas.push(toolUseBlock.name);
-
-      emit('tool_start', { tool: toolUseBlock.name, input: toolUseBlock.input });
-
-      const toolResult = await ejecutarTool(toolUseBlock, empresa_id, user_id);
-
-      emit('tool_end', { ok: toolResult.ok, mensaje: toolResult.mensaje });
-
-      // ── RONDA 2: stream sin tools, con tool_result ────────────────────────
-      try {
-        const stream2 = anthropic.messages.stream({
-          model:      MODEL,
-          max_tokens: 2000,
-          system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
-          messages:   [
-            ...(historial || []),
-            { role: 'user',      content: mensaje },
-            { role: 'assistant', content: finalMsg1.content },  // content completo de ronda 1
-            {
-              role:    'user',
-              content: [
-                {
-                  type:        'tool_result',
-                  tool_use_id: toolUseBlock.id,
-                  content:     toolResult.ok
-                    ? JSON.stringify({
-                        mensaje: toolResult.mensaje,
-                        ...(toolResult.datos   !== undefined && { datos:   toolResult.datos   }),
-                        ...(toolResult.choques !== undefined && { choques: toolResult.choques }),
-                      })
-                    : `Error: ${toolResult.mensaje}`,
-                },
-              ],
-            },
-          ],
-          // Sin tools: evita loops
-        });
-
-        for await (const event of stream2) {
-          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-            const chunk = event.delta.text;
-            textoRonda2 += chunk;
-            emit('delta', { texto: chunk });
-          }
-        }
-
-        const finalMsg2  = await stream2.finalMessage();
-        modeloUsado  = finalMsg2.model || modeloUsado;
-        totalInput  += finalMsg2.usage?.input_tokens  || 0;
-        totalOutput += finalMsg2.usage?.output_tokens || 0;
-
-        console.log('[chatWithNikoStream] Ronda 2 completa. tokens acumulados:', totalInput + totalOutput);
-        console.log('[chatWithNikoStream] Cache R2:', {
-          cache_creation: finalMsg2.usage?.cache_creation_input_tokens || 0,
-          cache_read:     finalMsg2.usage?.cache_read_input_tokens     || 0,
-          input_normal:   finalMsg2.usage?.input_tokens                || 0,
-          output:         finalMsg2.usage?.output_tokens               || 0,
-        });
-
-      } catch (err) {
-        if (esErrorSaturacion(err)) {
-          console.warn(`[chatWithNikoStream] Saturación ronda 2 (${err.status}).`);
-          const textoSat = mensajeSaturacionAleatorio();
-          toolsUsadas.push('_saturacion');
-          emit('delta', { texto: textoSat });
-          textoRonda2 = textoSat;
-          const respSat = (textoRonda1 + textoRonda2).trim();
-          persistirYTerminar({ respuesta: respSat, eerrAmpliado: false, saturado: true });
-          return;
-        }
-        throw err;
-      }
-    }
-  }
-
-  // ── 8. Marcar primera sesión completada si corresponde ───────────────────
-  if (contextoFinanciero?.es_primera_sesion === true) {
+  if (contexto_financiero?.es_primera_sesion === true) {
     const { error: updateError } = await supabase
       .from('empresas')
       .update({ primera_conversacion_niko_completada: true })
@@ -1321,33 +1164,222 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
     }
   }
 
-  // ── 9. Verificar flag EERR Ampliado ──────────────────────────────────────
-  let eerrAmpliado = false;
-  const { data: empresaFlags } = await supabase
-    .from('empresas')
-    .select('eerr_ampliado_revelado, eerr_ampliado_niko_notificado')
-    .eq('id', empresa_id)
-    .single();
+  // ────────────────────────────────────────────────────────────
+  // ETAPA 5 — Flags EERR Ampliado
+  // ────────────────────────────────────────────────────────────
 
-  if (empresaFlags?.eerr_ampliado_revelado && !empresaFlags?.eerr_ampliado_niko_notificado) {
-    await supabase
+  let eerrAmpliadoRecienRevelado = false;
+  try {
+    const { data: flags } = await supabase
       .from('empresas')
-      .update({ eerr_ampliado_niko_notificado: true })
-      .eq('id', empresa_id);
-    eerrAmpliado = true;
+      .select('eerr_ampliado_revelado, eerr_ampliado_niko_notificado')
+      .eq('id', empresa_id)
+      .maybeSingle();
+
+    if (flags?.eerr_ampliado_revelado && !flags?.eerr_ampliado_niko_notificado) {
+      const { error: updErr } = await supabase
+        .from('empresas')
+        .update({ eerr_ampliado_niko_notificado: true })
+        .eq('id', empresa_id);
+
+      if (!updErr) eerrAmpliadoRecienRevelado = true;
+    }
+  } catch (errFlag) {
+    console.warn('[niko] Error EERR ampliado flag:', errFlag.message);
   }
 
-  // ── 10. Armar respuesta completa y emitir done ───────────────────────────
-  let respuestaCompleta = (textoRonda1 + textoRonda2).trim();
+  // ────────────────────────────────────────────────────────────
+  // ETAPA 6 — Persistir y terminar
+  // ────────────────────────────────────────────────────────────
 
-  if (!respuestaCompleta) {
-    console.warn('[chatWithNikoStream] Respuesta vacía de Claude, usando fallback');
-    const fallback = 'Disculpa, hubo un problema. ¿Puedes repetir tu pregunta?';
-    emit('delta', { texto: fallback });
-    respuestaCompleta = fallback;
+  const latencia_ms   = Date.now() - inicio;
+  const tokens_usados = (resultado.usage?.input_tokens || 0) + (resultado.usage?.output_tokens || 0);
+
+  emit('done', {
+    respuesta: resultado.texto,
+    eerr_ampliado_recien_revelado: eerrAmpliadoRecienRevelado,
+    meta: {
+      intent:        routing.intent,
+      accion:        routing.accion,
+      txn_id:        txnId,
+      tools_usadas:  resultado.toolsUsadas || [],
+      tokens_usados,
+    },
+    saturado: resultado.saturado || false,
+  });
+
+  // Fire-and-forget: persistir respuesta del assistant
+  supabase
+    .from('niko_conversaciones')
+    .insert({
+      empresa_id,
+      user_id,
+      rol:             'assistant',
+      mensaje:         resultado.texto,
+      tools_invocadas: resultado.toolsUsadas || [],
+      tokens_usados,
+      latencia_ms,
+    })
+    .then(({ error: e }) => {
+      if (e) console.error('[niko] Error persistiendo conversación:', e.message);
+    });
+}
+
+// ─── flujoModificar ───────────────────────────────────────────────────────────
+//
+// Sub-flujo especial para intents de modificar (completar/editar/eliminar/reactivar).
+// Cadena: Contexto (identificar UUID) → Modificar (ejecutar) → Supervisor (validar).
+//
+async function flujoModificar({
+  mensaje, historial, txnId, steps, nikoId, nikoList,
+  accion, empresa_context, empresa_id, user_id, emit,
+}) {
+  // ────────────────────────────────────────────────────────────
+  // PASO 1 — ¿Ya tenemos UUID resuelto?
+  // ────────────────────────────────────────────────────────────
+
+  let uuid_resuelto = nikoId;
+
+  // CASO A: hay NIKO_LIST + usuario eligió número → resolver elección
+  if (!uuid_resuelto && nikoList) {
+    uuid_resuelto = markers.resolverEleccionDeLista(historial, txnId, mensaje);
+    if (uuid_resuelto) {
+      console.log('[flujoModificar] UUID resuelto desde NIKO_LIST:', uuid_resuelto);
+    }
   }
 
-  persistirYTerminar({ respuesta: respuestaCompleta, eerrAmpliado, saturado: false });
+  // ────────────────────────────────────────────────────────────
+  // PASO 2 — Si NO hay UUID resuelto → llamar Niko-Contexto
+  // ────────────────────────────────────────────────────────────
+
+  if (!uuid_resuelto) {
+    console.log('[flujoModificar] Sin UUID. Llamando Niko-Contexto...');
+
+    const resultadoCtx = await llamarAgente({
+      agenteModule: agenteCtx,
+      input: agenteCtx.construirInput({
+        mensaje, historial, txn_id: txnId, empresa_context, accion,
+      }),
+      emit, empresa_id, user_id,
+    });
+
+    // Contexto terminó el turno: emitió NIKO_ID o NIKO_LIST en su texto.
+    // El usuario debe responder. Terminar aquí.
+    return resultadoCtx;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // PASO 3 — UUID resuelto → llamar Niko-Modificar
+  // ────────────────────────────────────────────────────────────
+
+  console.log('[flujoModificar] UUID resuelto. Llamando Niko-Modificar...');
+
+  const resultadoMod = await llamarAgente({
+    agenteModule: agenteMod,
+    input: agenteMod.construirInput({
+      mensaje, historial, txn_id: txnId, empresa_context,
+      accion,
+      nikoId: uuid_resuelto,
+    }),
+    emit, empresa_id, user_id,
+  });
+
+  // ────────────────────────────────────────────────────────────
+  // PASO 4 — Validar tool execution (anti-alucinación Bug 3)
+  // ────────────────────────────────────────────────────────────
+
+  const accionParaValidador = accion === 'eliminar' ? 'eliminar' : 'actualizar';
+
+  const checkTool = validador.verificarToolEjecutada(
+    resultadoMod.toolsUsadas,
+    accionParaValidador,
+    resultadoMod.texto,
+  );
+
+  if (checkTool.ok) {
+    console.log('[validador] Modificar OK. Tool ejecutada correctamente.');
+    return resultadoMod;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // PASO 5 — Validador detectó alucinación → verificar BD
+  // ────────────────────────────────────────────────────────────
+
+  console.warn('[validador] Posible alucinación detectada. Verificando BD...');
+
+  const matchTitulo    = resultadoMod.texto.match(/\*\*([^*]+)\*\*/);
+  const tituloParaBD   = matchTitulo ? matchTitulo[1] : '';
+
+  const checkBD = await validador.verificarBD(empresa_id, accion, tituloParaBD);
+
+  if (checkBD.confirmadoEnBD) {
+    console.log('[validador] BD confirma la acción. Falso positivo del validador.');
+    return resultadoMod;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // PASO 6 — Alucinación confirmada → loop supervisor (máx 2)
+  // ────────────────────────────────────────────────────────────
+
+  console.error('[supervisor] ALUCINACIÓN CONFIRMADA. Iniciando supervisor...');
+
+  for (let iter = 1; iter <= 2; iter++) {
+    const veredicto = await supervisorLLM({
+      accion,
+      toolsUsadas: resultadoMod.toolsUsadas,
+      textoCandidato: resultadoMod.texto,
+      iteracion: iter,
+    });
+
+    if (veredicto.veredicto === 'ok') {
+      console.log('[supervisor] Iter', iter, ': veredicto OK. Confiar al supervisor.');
+      return resultadoMod;
+    }
+
+    if (veredicto.veredicto === 'retry') {
+      console.warn('[supervisor] Iter', iter, ': retry forzando tool_choice=any');
+      const retryResultado = await llamarAgente({
+        agenteModule: agenteMod,
+        input: agenteMod.construirInput({
+          mensaje, historial, txn_id: txnId, empresa_context,
+          accion,
+          nikoId: uuid_resuelto,
+        }),
+        emit, empresa_id, user_id,
+        toolChoice: 'any',
+      });
+
+      const reCheck = validador.verificarToolEjecutada(
+        retryResultado.toolsUsadas,
+        accionParaValidador,
+        retryResultado.texto,
+      );
+
+      if (reCheck.ok) {
+        console.log('[supervisor] Retry exitoso en iter', iter);
+        return retryResultado;
+      }
+    }
+
+    if (veredicto.veredicto === 'fallback') break;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // PASO 7 — CATÁSTROFE: 2 retries sin éxito
+  // ────────────────────────────────────────────────────────────
+
+  console.error('[supervisor] CATÁSTROFE empresa_id=' + empresa_id + ' accion=' + accion);
+
+  const mensajeCatastrofe = 'Disculpa, tuve un problema técnico procesando eso. El cambio puede no haberse guardado. Por favor verifica en tu lista de recordatorios.';
+
+  emit('delta', { texto: mensajeCatastrofe });
+
+  return {
+    texto:       mensajeCatastrofe,
+    toolsUsadas: resultadoMod.toolsUsadas,
+    usage:       resultadoMod.usage,
+    saturado:    false,
+  };
 }
 
 // ─── Formatear contexto financiero como texto para el system prompt ──────────
