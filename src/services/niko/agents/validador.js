@@ -55,6 +55,16 @@ const PATRONES_VERBALIZACION = [
   /antes\s+de\s+responder[,]?\s+/i,
   /para\s+darte\s+esta\s+respuesta/i,
   /generando\s+respuesta/i,
+  // ── Gap 1: "permíteme [verbo]" ──
+  /perm[ií]teme\s+(consultar|revisar|verificar|buscar|chequear)/i,
+  // ── Gap 2: "consultando [algo del sistema]" sin "la base" ──
+  /\bconsultando\b/i,
+  // ── Gap 3: "llamo a [tool]" ──
+  /\bllamo\s+a\s+(listar|buscar|crear|verificar|consultar|actualizar|eliminar)/i,
+  // ── Gap 4: "voy a llamar" (variante sin complemento) ──
+  /voy\s+a\s+llamar/i,
+  // ── Gap 5: "estoy [gerundio interno]" ──
+  /estoy\s+(consultando|buscando|revisando|verificando|procesando|chequeando)/i,
 ];
 
 // ─── Patrones de promesa de acción (20 patrones) ─────────────────────────────
@@ -90,6 +100,12 @@ const PATRONES_PROMESA_ACCION = [
   /perfecto[,]?\s+qued[oó]/i,
   /ya\s+lo\s+(marqu[eé]|borr[eé]|elimin[eé])/i,
   /reactiv[eé]\s+[^.]+\s+como\s+pendiente/i,
+  // ── Gap A: pronombres intercalados "Listo, lo marqué" ──
+  /listo[,]?\s+(?:lo|la|los|las|te|me|se|ya)\s+(marqu[eé]|complet[eé]|elimin[eé]|borr[eé]|agend[eé]|actualic[eé]|reactiv[eé])/i,
+  // ── Gap B: participios después de "Listo," ──
+  /listo[,]?\s+(agendado|marcado|completado|eliminado|borrado|actualizado|reactivado)/i,
+  // ── Gap C: "X quedó/está [participio]" ──
+  /\b(?:qued[oó]|est[aá])\s+(agendado|marcado|completado|eliminado|borrado|actualizado|reactivado)\b/i,
 ];
 
 // ─── Mapa accion → tool requerida ────────────────────────────────────────────
