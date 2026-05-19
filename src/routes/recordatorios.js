@@ -217,7 +217,23 @@ async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqu
       return { ok: true, recordatorios: data || [] };
     }
 
-    // RAMA 2: Listado abierto (sin titulo_busqueda) → filtro próximos 3 días.
+    // RAMA 2: Listado abierto (sin titulo_busqueda).
+    // - completado=true  → solo completados, sin filtro de fecha, LIMIT 5, DESC.
+    // - completado!==true → solo pendientes (o todos si undefined), próximos 3 días, LIMIT 10, ASC.
+    if (completado === true) {
+      const query = supabase
+        .from('recordatorios')
+        .select('*')
+        .eq('empresa_id', empresa_id)
+        .eq('completado', true)
+        .order('fecha_vencimiento', { ascending: false, nullsFirst: false })
+        .limit(5);
+
+      const { data, error } = await query;
+      if (error) throw new Error(error.message);
+      return { ok: true, recordatorios: data };
+    }
+
     // Mantener lógica original con .or() para timezone Santiago.
     const hoyStr    = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
     const hoyMs     = new Date(hoyStr + 'T00:00:00Z').getTime();

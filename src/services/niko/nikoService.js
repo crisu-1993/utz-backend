@@ -107,7 +107,11 @@ const NIKO_TOOLS = [
   },
   {
     name: 'listar_recordatorios',
-    description: "Lista los recordatorios del usuario para los PRÓXIMOS 3 DÍAS (hoy y próximos 3). Úsala cuando el usuario te pregunta '¿qué tengo pendiente?' o necesitas identificar un recordatorio para editar/eliminar. Si el usuario pide recordatorios más allá de 3 días, NO llames la tool — invítalo a revisar la pestaña /recordatorios.",
+    description: 'Lista los recordatorios del usuario. ' +
+      'Default (sin completado o completado=false): solo PENDIENTES de los próximos 3 días, máximo 10, orden ASC. ' +
+      'Con completado=true: solo COMPLETADOS sin filtro de fecha, máximo 5, ordenados del más reciente al más antiguo. ' +
+      'Con titulo_busqueda: busca por nombre tolerante a acentos sin filtro de fecha; usa completado=true/false para filtrar por estado. ' +
+      'Úsala cuando el usuario pregunta qué tiene pendiente, o cuando necesitas identificar un recordatorio para editar/eliminar/reactivar.',
     input_schema: {
       type: 'object',
       properties: {
