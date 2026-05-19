@@ -217,20 +217,23 @@ async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqu
       return { ok: true, recordatorios: data || [] };
     }
 
-    // RAMA 2: Listado abierto (sin titulo_busqueda) → filtro próximos 3 días.
-    // Mantener lógica original con .or() para timezone Santiago.
-    const hoyStr    = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
-    const hoyMs     = new Date(hoyStr + 'T00:00:00Z').getTime();
-    const limiteMs  = hoyMs + dias_adelante * 86400000;
-    const limiteStr = new Date(limiteMs).toISOString().slice(0, 10);
-
+    // RAMA 2: Listado abierto (sin titulo_busqueda).
+    // Si dias_adelante=null → sin filtro de fecha (lista todo).
+    // Si dias_adelante=N   → filtro próximos N días.
     let query = supabase
       .from('recordatorios')
       .select('*')
       .eq('empresa_id', empresa_id)
-      .or(`fecha_vencimiento.is.null,fecha_vencimiento.lte.${limiteStr}`)
       .order('fecha_vencimiento', { ascending: true, nullsFirst: true })
-      .limit(10);
+      .limit(dias_adelante !== null ? 10 : 50);
+
+    if (dias_adelante !== null) {
+      const hoyStr    = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
+      const hoyMs     = new Date(hoyStr + 'T00:00:00Z').getTime();
+      const limiteMs  = hoyMs + dias_adelante * 86400000;
+      const limiteStr = new Date(limiteMs).toISOString().slice(0, 10);
+      query = query.or(`fecha_vencimiento.is.null,fecha_vencimiento.lte.${limiteStr}`);
+    }
 
     if (completado !== undefined) {
       query = query.eq('completado', completado);

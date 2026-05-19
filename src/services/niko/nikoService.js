@@ -133,6 +133,10 @@ PROHIBIDO: decir que otro sistema busca por ti. Tú eres Niko y tú buscas.`,
           type: 'boolean',
           description: 'Si true, lista solo completados. Si false, solo pendientes. Si se omite, lista todos.',
         },
+        solo_proximos: {
+          type: 'boolean',
+          description: 'Si true, lista SOLO los recordatorios de los próximos 3 días. Si false u omitido, lista todos los que coincidan con los otros filtros (sin límite de fecha).',
+        },
       },
       required: [],
     },
@@ -335,9 +339,12 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
   if (name === 'listar_recordatorios') {
     const { listarRecordatorios } = require('../../routes/recordatorios');
 
+    // Si solo_proximos=true, limitar a 3 días. Si no, sin límite (null = sin restricción).
+    const diasAdelante = input.solo_proximos === true ? 3 : null;
+
     const resultado = await listarRecordatorios({
       empresa_id,
-      dias_adelante:   3,
+      dias_adelante:   diasAdelante,
       titulo_busqueda: input.titulo_busqueda,
       completado:      input.completado,
     });
@@ -364,6 +371,47 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
 
   if (name === 'actualizar_recordatorio') {
     const { actualizarRecordatorio } = require('../../routes/recordatorios');
+    const supabase = getSupabase();
+
+    // Verificar choques SOLO si se está modificando fecha y/o hora
+    let choquesAviso = null;
+    if (input.fecha_vencimiento || input.hora_vencimiento) {
+      // Obtener el recordatorio actual para conocer la fecha/hora existentes
+      const { data: actual } = await supabase
+        .from('recordatorios')
+        .select('fecha_vencimiento, hora_vencimiento')
+        .eq('id', input.id)
+        .single();
+
+      const fechaFinal = input.fecha_vencimiento || actual?.fecha_vencimiento;
+      const horaFinal  = input.hora_vencimiento  || actual?.hora_vencimiento;
+
+      if (fechaFinal && horaFinal) {
+        const horaSQL = horaFinal.length === 5 ? `${horaFinal}:00` : horaFinal;
+
+        const { data: choquesData, error: choquesError } = await supabase.rpc('verificar_choque_recordatorio', {
+          p_empresa_id: empresa_id,
+          p_fecha:      fechaFinal,
+          p_hora:       horaSQL,
+        });
+
+        if (choquesError) {
+          console.error('[ejecutarTool] Error verificar_choque interno (actualizar):', choquesError.message);
+        } else if (choquesData && choquesData.length > 0) {
+          // Excluir el propio recordatorio que estamos actualizando (evita falso positivo)
+          const choquesFiltrados = choquesData.filter(r => r.id !== input.id);
+          if (choquesFiltrados.length > 0) {
+            choquesAviso = choquesFiltrados.map(r => ({
+              id:                r.id,
+              titulo:            r.titulo,
+              fecha_vencimiento: r.fecha_vencimiento,
+              hora_vencimiento:  r.hora_vencimiento,
+              tipo_choque:       r.tipo_choque,
+            }));
+          }
+        }
+      }
+    }
 
     const resultado = await actualizarRecordatorio({
       empresa_id,
@@ -383,6 +431,7 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
       ok:      true,
       mensaje: 'Recordatorio actualizado correctamente.',
       datos:   resultado.recordatorio,
+      choques: choquesAviso,
     };
   }
 
