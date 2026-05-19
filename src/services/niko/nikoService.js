@@ -42,7 +42,7 @@ function mensajeSaturacionAleatorio() {
 const NIKO_TOOLS = [
   {
     name: 'guardar_regla_categorizacion',
-    description: "Guarda una regla permanente que asocia un patrón de texto con una categoría del EERR. Llama esta tool ÚNICAMENTE cuando el usuario confirmó de forma explícita y clara (ejemplos de confirmación válida: 'sí', 'dale', 'listo', 'hagámoslo', 'perfecto', 'ya', 'ok', 'bueno', 'sí po'). NUNCA la llames si el usuario dudó, preguntó algo más, cambió de tema, o no respondió con claridad afirmativa. Si hay duda, primero aclara y espera confirmación. IMPORTANTE: Antes de llamar esta tool, valida con el usuario que la categoría elegida sea coherente con el tipo de las transacciones (Ventas/Otros ingresos solo para ingresos; el resto solo para egresos). Si el bloque es mixto (hay tanto ingresos como egresos con ese patrón), pregúntale al usuario antes de aplicar. Si después de aplicar la regla recibes incoherencias_detectadas en el resultado, informa al usuario y pregunta cómo categorizar las transacciones pendientes.",
+    description: "PROHIBIDO: decir 'voy a guardar la regla', 'déjame procesar', 'otro sistema lo hará'. Tú eres Niko y tú guardas la regla.\n\nGuarda una regla permanente que asocia un patrón de texto con una categoría del EERR. Llama esta tool ÚNICAMENTE cuando el usuario confirmó de forma explícita y clara (ejemplos de confirmación válida: 'sí', 'dale', 'listo', 'hagámoslo', 'perfecto', 'ya', 'ok', 'bueno', 'sí po'). NUNCA la llames si el usuario dudó, preguntó algo más, cambió de tema, o no respondió con claridad afirmativa. Si hay duda, primero aclara y espera confirmación. IMPORTANTE: Antes de llamar esta tool, valida con el usuario que la categoría elegida sea coherente con el tipo de las transacciones (Ventas/Otros ingresos solo para ingresos; el resto solo para egresos). Si el bloque es mixto (hay tanto ingresos como egresos con ese patrón), pregúntale al usuario antes de aplicar. Si después de aplicar la regla recibes incoherencias_detectadas en el resultado, informa al usuario y pregunta cómo categorizar las transacciones pendientes.",
     input_schema: {
       type: 'object',
       properties: {
@@ -83,7 +83,13 @@ const NIKO_TOOLS = [
   },
   {
     name: 'crear_recordatorio',
-    description: "Crea un recordatorio en la pestaña 'Creados por mí' del usuario. Llama esta tool ÚNICAMENTE cuando el usuario te pide explícitamente que le recuerdes algo Y ya tienes la fecha exacta confirmada (formato YYYY-MM-DD). NO llames la tool si falta la fecha o si la fecha es relativa sin confirmar (ej: 'en 3 días', 'la próxima semana'). En esos casos primero calcula la fecha absoluta y confirma con el usuario antes de llamar la tool.",
+    description: `Crea un recordatorio en la pestaña 'Creados por mí' del usuario.
+
+CUÁNDO LLAMARLA: cuando el usuario te pide explícitamente agendar algo Y ya recibiste su confirmación EXPLÍCITA de la fecha en un turno PREVIO ('sí', 'dale', 'confirma', 'ok'). El primer mensaje del usuario donde menciona el recordatorio NO es confirmación — es intención. Siempre hay 2 turnos: turno 1 propones fecha y preguntas, turno 2 (tras confirmación) llamas esta tool.
+
+CÓMO LLAMARLA: en silencio. Tú la ejecutas directamente con la fecha en formato YYYY-MM-DD. Nunca digas 'voy a agendar', 'déjame guardar', 'consultando el sistema' — solo ejecuta y después confirma al usuario con 'Listo, agendado para DD/MM/AAAA'.
+
+PROHIBIDO: decir que otro sistema, módulo o asistente lo hace. Tú eres Niko y tú lo agendas. NO simules haber llamado esta tool — si no la llamaste, no digas 'listo, agendado'.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -109,7 +115,15 @@ const NIKO_TOOLS = [
   },
   {
     name: 'listar_recordatorios',
-    description: "Lista los recordatorios del usuario para los PRÓXIMOS 3 DÍAS (hoy y próximos 3). Úsala cuando el usuario te pregunta '¿qué tengo pendiente?' o necesitas identificar un recordatorio para editar/eliminar. Si el usuario pide recordatorios más allá de 3 días, NO llames la tool — invítalo a revisar la pestaña /recordatorios.",
+    description: `Lista los recordatorios del usuario.
+
+CUÁNDO LLAMARLA: cuando el usuario pregunta '¿qué tengo agendado?', '¿qué tengo pendiente?', o cuando necesitas identificar UN recordatorio para editar/completar/eliminar/reactivar.
+
+OPTIMIZACIÓN CRÍTICA: si en tus mensajes anteriores del MISMO historial ya escribiste un comentario invisible <!-- NIKO_ID:[uuid] -->, significa que YA identificaste el recordatorio. NO vuelvas a llamar listar_recordatorios. Solo extrae el UUID del comentario invisible y úsalo directo con actualizar_recordatorio o eliminar_recordatorio.
+
+CÓMO LLAMARLA: en silencio. Nunca digas 'déjame buscar', 'consultando mis registros', 'voy a verificar' — solo ejecuta y presenta el resultado al usuario en lenguaje natural.
+
+PROHIBIDO: decir que otro sistema busca por ti. Tú eres Niko y tú buscas.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -127,7 +141,15 @@ const NIKO_TOOLS = [
   },
   {
     name: 'actualizar_recordatorio',
-    description: "Actualiza un recordatorio existente. Cubre TODOS los casos: editar (título/descripción/fecha) Y completar/descompletar. Llama esta tool SOLO después de identificar el recordatorio con listar_recordatorios y obtener confirmación del usuario.",
+    description: `Actualiza un recordatorio existente. Cubre editar (título, descripción, fecha, hora) Y completar/descompletar.
+
+CUÁNDO LLAMARLA: cuando el usuario confirmó explícitamente que quiere modificar/completar/reactivar un recordatorio ya identificado. SIEMPRE hay 2 turnos: turno 1 identificas + propones + esperas 'sí', turno 2 (tras confirmación) llamas esta tool.
+
+CÓMO OBTENER EL UUID: en tu mensaje del turno anterior debiste escribir un comentario invisible <!-- NIKO_ID:[uuid] -->. En este turno, lee ese comentario y extrae el UUID directamente. NUNCA inventes el UUID. NUNCA vuelvas a llamar listar_recordatorios si ya tienes el comentario.
+
+CÓMO LLAMARLA: en silencio. Después confirma al usuario con 'Listo, marqué [título] como hecho' o 'Listo, cambié la fecha a DD/MM/AAAA'.
+
+PROHIBIDO: decir 'voy a actualizar', 'déjame modificar', 'otro sistema lo hará'. Tú eres Niko y tú lo actualizas. NO simules — si no llamaste la tool, no digas 'listo'.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -161,7 +183,15 @@ const NIKO_TOOLS = [
   },
   {
     name: 'eliminar_recordatorio',
-    description: "Elimina un recordatorio definitivamente. Acción irreversible. Llama esta tool SOLO después de identificar con listar_recordatorios y recibir DOBLE confirmación del usuario.",
+    description: `Elimina un recordatorio definitivamente. Acción IRREVERSIBLE.
+
+CUÁNDO LLAMARLA: cuando el usuario confirmó explícitamente que quiere eliminar un recordatorio ya identificado. SIEMPRE hay 2 turnos: turno 1 identificas + preguntas '¿confirmas que lo elimino?', turno 2 (tras confirmación) llamas esta tool.
+
+CÓMO OBTENER EL UUID: en tu mensaje del turno anterior debiste escribir un comentario invisible <!-- NIKO_ID:[uuid] -->. En este turno, lee ese comentario y extrae el UUID directamente. NUNCA inventes el UUID. NUNCA vuelvas a llamar listar_recordatorios si ya tienes el comentario.
+
+CÓMO LLAMARLA: en silencio. Después confirma con 'Listo, eliminé [título]'.
+
+PROHIBIDO: decir 'voy a eliminar', 'déjame borrar', 'otro sistema lo hará'. Tú eres Niko y tú lo eliminas. NO simules — si no llamaste la tool, no digas 'eliminado'.`,
     input_schema: {
       type: 'object',
       properties: {
