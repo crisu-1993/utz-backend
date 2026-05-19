@@ -5,6 +5,16 @@ const { createClient }                 = require('@supabase/supabase-js');
 const { buildSystemPrompt }            = require('./systemPrompt');
 const { obtenerContextoFinanciero }    = require('./contextoFinanciero');
 
+// ─── Agentes multi-agente ─────────────────────────────────────────────────────
+const markers      = require('./agents/markers');
+const validador    = require('./agents/validador');
+const agenteCrear  = require('./agents/crear');
+const agenteListar = require('./agents/listar');
+const agenteConv   = require('./agents/conversacion');
+const agenteCtx    = require('./agents/contexto');
+const agenteMod    = require('./agents/modificar');
+const agenteMadre  = require('./agents/madre');
+
 const MODEL = 'claude-sonnet-4-6';
 
 // ─── Mensaje de incidente (saturación / error transitorio) ───────────────────
@@ -607,6 +617,386 @@ function detectarIntencionRecordatorio(mensaje, historial) {
   // Niko responderá con auto y preguntará lo que falte. El forzado ocurre en
   // el turno siguiente cuando el usuario responda la pregunta (CASO 1).
   return false;
+}
+
+// ─── routingShortcut ──────────────────────────────────────────────────────────
+//
+// Función PURA de routing sin LLM (0 tokens, 0 latencia).
+// Retorna { intent, accion, confianza, motivo } o null si no puede decidir.
+// Si confianza < 0.85 → el router debe llamar llamarMadreJSON como fallback.
+
+function routingShortcut(mensaje, txnId, steps, nikoId, nikoList, accion) {
+  // ── CAPA 1 — Continuación de TXN activo (confianza 1.0) ─────────────────
+  if (txnId && Array.isArray(steps) && steps.length > 0) {
+
+    // A) NIKO_LIST presente + usuario elige número ordinal
+    if (nikoList && /^(el\s+)?\d+\s*$|el\s+(primero|segundo|tercero)/i.test(mensaje.trim())) {
+      return { intent: 'modificar', accion, confianza: 1.0, motivo: 'eleccion_lista' };
+    }
+
+    // B) NIKO_ID presente + mensaje afirmativo
+    if (nikoId && markers.esMensajeAfirmativo(mensaje)) {
+      return { intent: 'modificar', accion, confianza: 1.0, motivo: 'confirmacion_modificar' };
+    }
+
+    // C) NIKO_ID presente + negativo explícito
+    if (nikoId && /^(no\b|mejor\s+no|cancela|d[eé]jalo|no\s+lo|dejalo)/i.test(mensaje.trim())) {
+      return { intent: 'conversacion', accion: null, confianza: 1.0, motivo: 'cancelacion' };
+    }
+
+    // D) TXN activo sin NIKO_ID (Contexto aún identificando)
+    if (!nikoId && steps.some(s => s.includes('contexto'))) {
+      return { intent: 'modificar', accion, confianza: 0.9, motivo: 'respuesta_contexto' };
+    }
+
+    // E) TXN de crear activo (Crear preguntó descripción/hora/fecha)
+    if (steps.some(s => s.includes('crear'))) {
+      return { intent: 'crear', accion: null, confianza: 0.95, motivo: 'continuar_crear' };
+    }
+  }
+
+  // ── CAPA 2 — Patrones high-confidence sin TXN activo ────────────────────
+  const msg = mensaje.toLowerCase().trim();
+
+  // LISTAR completados (prioridad sobre listar genérico)
+  if (/mu[eé]strame\s+(los\s+)?completados|qu[eé]\s+complet[eé]|recordatorios\s+hechos|los\s+hechos/i.test(msg)) {
+    return { intent: 'listar', accion: 'completados', confianza: 0.95, motivo: 'listar_completados' };
+  }
+
+  // LISTAR pendientes
+  if (/qu[eé]\s+tengo\s+(agendado|pendiente)|qu[eé]\s+recordatorios|mu[eé]strame\s+(los\s+)?recordatorios|lista(me)?\s+los\s+recordatorios|tengo\s+algo\s+pendiente/i.test(msg)) {
+    return { intent: 'listar', accion: 'pendientes', confianza: 0.95, motivo: 'listar_pendientes' };
+  }
+
+  // CREAR
+  if (/ag[eé]ndame\b|recu[eé]rdame\b|crea\s+(un\s+)?recordatorio|anota\s+(un\s+)?recordatorio|pon\s+(un\s+)?recordatorio/i.test(msg)) {
+    return { intent: 'crear', accion: null, confianza: 0.90, motivo: 'crear_explicito' };
+  }
+
+  // MODIFICAR completar
+  if (/marca(r?)\s+.{0,40}(como\s+)?(hecho|completado)|complet(a|ar)\s+.{0,40}|ya\s+hice\b.{0,30}|lo\s+hice\b.{0,30}/i.test(msg)) {
+    return { intent: 'modificar', accion: 'completar', confianza: 0.95, motivo: 'modificar_completar' };
+  }
+
+  // MODIFICAR eliminar
+  if (/elimina(r?)\s+.{0,40}|borra(r?)\s+.{0,40}recordatorio|sac(a|ar)\s+.{0,40}recordatorio|ya\s+no\s+necesito\s+.{0,40}/i.test(msg)) {
+    return { intent: 'modificar', accion: 'eliminar', confianza: 0.95, motivo: 'modificar_eliminar' };
+  }
+
+  // MODIFICAR editar
+  if (/cambia(r?)\s+.{0,30}(a|para|de)\s+.{0,30}|edita(r?)\s+.{0,40}|modifica(r?)\s+.{0,40}|mueve(r?)\s+.{0,40}(al|para\s+el)|actualiza(r?)\s+.{0,40}/i.test(msg)) {
+    return { intent: 'modificar', accion: 'editar', confianza: 0.90, motivo: 'modificar_editar' };
+  }
+
+  // MODIFICAR reactivar
+  if (/reactiva(r?)\s+|vuelve\s+a\s+poner\s+pendiente|desmarca(r?)\s+.{0,40}(como\s+)?hecho|lo\s+dej[eé]\s+pendiente\s+de\s+nuevo/i.test(msg)) {
+    return { intent: 'modificar', accion: 'reactivar', confianza: 0.95, motivo: 'modificar_reactivar' };
+  }
+
+  // ── CAPA 3 — No hay match → necesita Madre LLM ──────────────────────────
+  return null;
+}
+
+// ─── extraerAccionDelTxn ──────────────────────────────────────────────────────
+//
+// Lee los steps del TXN activo y extrae la sub-acción codificada
+// como "accion=X" en los marcadores de Contexto/Modificar.
+
+function extraerAccionDelTxn(steps) {
+  if (!Array.isArray(steps)) return null;
+  for (const step of steps) {
+    const m = step.match(/accion=(\w+)/);
+    if (m) return m[1]; // 'completar' | 'editar' | 'eliminar' | 'reactivar'
+  }
+  return null;
+}
+
+// ─── llamarMadreJSON ──────────────────────────────────────────────────────────
+//
+// Fallback LLM para routing cuando routingShortcut retorna null.
+// Llama a Niko-Madre en modo ROUTING, retorna JSON parseado.
+
+async function llamarMadreJSON({ mensaje, historial, txnId, steps, nikoId, nikoList, accion }) {
+  const anthropic = new Anthropic();
+
+  // Construir los flags de estado del TXN como strings descriptivos para Madre
+  const nikoListActivo = !!(nikoList && Object.keys(nikoList).length > 0);
+
+  const input = agenteMadre.construirInputRouting({
+    mensaje,
+    historial:        (historial || []).slice(-10), // últimas 10 msgs para Madre
+    txn_activo:       txnId  || null,
+    niko_id_activo:   nikoId || null,
+    niko_list_activo: nikoListActivo,
+    steps_txn:        steps  || [],
+  });
+
+  let response;
+  try {
+    response = await anthropic.messages.create({
+      model:      MODEL,
+      max_tokens: 200,
+      system:     input.system,
+      messages:   input.messages,
+    });
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      console.warn('[madre.routing] Saturación. Fallback a conversacion.');
+      return { intent: 'conversacion', accion: null, confianza: 0.5, motivo: 'fallback_saturacion' };
+    }
+    throw err;
+  }
+
+  const textBlock = response.content.find(b => b.type === 'text');
+  const texto = textBlock?.text || '';
+
+  const parsed = agenteMadre.parseRespuestaJSON(texto, 'routing');
+
+  if (!parsed || !parsed.agente) {
+    console.warn('[madre.routing] JSON inválido o sin agente. Default a conversacion.');
+    return { intent: 'conversacion', accion: null, confianza: 0.5, motivo: 'json_invalido' };
+  }
+
+  console.log('[madre.routing] intent:', parsed.agente, '| accion:', parsed.accion, '| confianza:', parsed.confianza);
+
+  return {
+    intent:    parsed.agente,
+    accion:    parsed.accion   || null,
+    confianza: parsed.confianza || 0.7,
+    motivo:    parsed.razonamiento || 'madre_llm',
+  };
+}
+
+// ─── llamarAgente ─────────────────────────────────────────────────────────────
+//
+// Función genérica que ejecuta CUALQUIER agente multi-agente.
+// Maneja R1 (buffered) + R2 (streamed si hay tool call).
+// Aplica verificarDobleRespuesta y verificarVerbalizacion del validador.
+//
+// @param {object} agenteModule  - Módulo importado del agente (tiene TOOLS_PERMITIDAS)
+// @param {object} input         - { system, messages } ya construido con construirInput()
+// @param {Function} emit        - función SSE
+// @param {string} empresa_id    - para ejecutarTool
+// @param {string} user_id       - para ejecutarTool
+// @param {string|null} toolChoice - 'auto' | 'any' | null (null = sin tool_choice override)
+// @returns {{ texto, toolsUsadas, usage, stopReasonR1, saturado, toolResult? }}
+
+async function llamarAgente({ agenteModule, input, emit, empresa_id, user_id, toolChoice = null }) {
+  const anthropic = new Anthropic();
+
+  // Filtrar tools a las que el agente tiene permitidas
+  const toolsDelAgente = NIKO_TOOLS.filter(t =>
+    agenteModule.TOOLS_PERMITIDAS.includes(t.name)
+  );
+
+  // ── RONDA 1 — stream buffered ─────────────────────────────────────────────
+  let textoR1 = '';
+  let stream1;
+
+  try {
+    const r1Opts = {
+      model:      MODEL,
+      max_tokens: 2000,
+      system:     [{ type: 'text', text: input.system, cache_control: { type: 'ephemeral' } }],
+      messages:   input.messages,
+    };
+
+    if (toolsDelAgente.length > 0) {
+      r1Opts.tools = toolsDelAgente;
+      if (toolChoice) r1Opts.tool_choice = { type: toolChoice };
+    }
+
+    stream1 = anthropic.messages.stream(r1Opts);
+
+    for await (const event of stream1) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        textoR1 += event.delta.text;
+      }
+    }
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      const msg = mensajeSaturacionAleatorio();
+      emit('delta', { texto: msg });
+      return { texto: msg, toolsUsadas: [], usage: { input_tokens: 0, output_tokens: 0 }, stopReasonR1: 'saturacion', saturado: true };
+    }
+    throw err;
+  }
+
+  const finalMsg1 = await stream1.finalMessage();
+
+  const totalR1Input  = finalMsg1.usage?.input_tokens  || 0;
+  const totalR1Output = finalMsg1.usage?.output_tokens || 0;
+
+  console.log('[llamarAgente] R1 stop_reason:', finalMsg1.stop_reason,
+    '| tokens:', totalR1Input + totalR1Output,
+    '| cache_read:', finalMsg1.usage?.cache_read_input_tokens || 0);
+
+  // CHECK 1: verificarDobleRespuesta — descarta texto pre-tool si corresponde
+  const checkDoble = validador.verificarDobleRespuesta(textoR1, finalMsg1.stop_reason);
+  if (!checkDoble.emitir) textoR1 = '';
+
+  // ── Si end_turn → emitir R1 y retornar ───────────────────────────────────
+  if (finalMsg1.stop_reason === 'end_turn') {
+    if (textoR1) {
+      const checkVerb = validador.verificarVerbalizacion(textoR1);
+      if (!checkVerb.limpio) {
+        console.warn('[validador] Verbalización R1:', checkVerb.fraseDetectada);
+      }
+      emit('delta', { texto: textoR1 });
+    }
+    return {
+      texto:        textoR1,
+      toolsUsadas:  [],
+      usage:        { input_tokens: totalR1Input, output_tokens: totalR1Output },
+      stopReasonR1: 'end_turn',
+      saturado:     false,
+    };
+  }
+
+  // ── Si tool_use → ejecutar tool + Ronda 2 ────────────────────────────────
+  const toolUseBlock = finalMsg1.content.find(b => b.type === 'tool_use');
+
+  if (!toolUseBlock) {
+    console.error('[llamarAgente] stop_reason=tool_use pero no hay tool_use block');
+    return {
+      texto:        '',
+      toolsUsadas:  [],
+      usage:        { input_tokens: totalR1Input, output_tokens: totalR1Output },
+      stopReasonR1: 'error',
+      saturado:     false,
+    };
+  }
+
+  const toolsUsadas = [toolUseBlock.name];
+
+  emit('tool_start', { tool: toolUseBlock.name, input: toolUseBlock.input });
+  const toolResult = await ejecutarTool(toolUseBlock, empresa_id, user_id);
+  emit('tool_end', { ok: toolResult.ok, mensaje: toolResult.mensaje });
+
+  // Serializar tool result para R2
+  const toolResultContent = toolResult.ok
+    ? JSON.stringify({
+        mensaje:    toolResult.mensaje,
+        ...(toolResult.datos            !== undefined && { datos:             toolResult.datos            }),
+        ...(toolResult.choques          !== undefined && { choques:           toolResult.choques          }),
+        ...(toolResult.scope_completados !== undefined && { scope_completados: toolResult.scope_completados }),
+      })
+    : `Error: ${toolResult.mensaje}`;
+
+  // ── RONDA 2 — stream real-time ────────────────────────────────────────────
+  let textoR2  = '';
+  let stream2;
+
+  try {
+    stream2 = anthropic.messages.stream({
+      model:      MODEL,
+      max_tokens: 2000,
+      system:     [{ type: 'text', text: input.system, cache_control: { type: 'ephemeral' } }],
+      // Sin tools en R2 — evita loops
+      messages:   [
+        ...input.messages,
+        { role: 'assistant', content: finalMsg1.content },
+        {
+          role:    'user',
+          content: [{
+            type:        'tool_result',
+            tool_use_id: toolUseBlock.id,
+            content:     toolResultContent,
+          }],
+        },
+      ],
+    });
+
+    for await (const event of stream2) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        textoR2 += event.delta.text;
+        emit('delta', { texto: event.delta.text });
+      }
+    }
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      const msg = mensajeSaturacionAleatorio();
+      emit('delta', { texto: msg });
+      return { texto: msg, toolsUsadas, usage: { input_tokens: totalR1Input, output_tokens: totalR1Output }, stopReasonR1: 'tool_use', saturado: true };
+    }
+    throw err;
+  }
+
+  const finalMsg2 = await stream2.finalMessage();
+
+  // CHECK 2: verificarVerbalizacion en R2 (log solo, no abortar)
+  const checkVerbR2 = validador.verificarVerbalizacion(textoR2);
+  if (!checkVerbR2.limpio) {
+    console.warn('[validador] Verbalización R2:', checkVerbR2.fraseDetectada);
+  }
+
+  console.log('[llamarAgente] R2 completo. tokens acumulados:',
+    (totalR1Input + totalR1Output) + (finalMsg2.usage?.input_tokens || 0) + (finalMsg2.usage?.output_tokens || 0));
+
+  return {
+    texto:        textoR2,
+    toolsUsadas,
+    usage: {
+      input_tokens:  totalR1Input  + (finalMsg2.usage?.input_tokens  || 0),
+      output_tokens: totalR1Output + (finalMsg2.usage?.output_tokens || 0),
+    },
+    stopReasonR1: 'tool_use',
+    saturado:     false,
+    toolResult,   // expuesto para que flujoModificar pueda inspeccionar
+  };
+}
+
+// ─── supervisorLLM ────────────────────────────────────────────────────────────
+//
+// Llama a Niko-Madre en modo SUPERVISIÓN cuando el validador programático
+// detecta posible alucinación y la BD la confirma.
+// Retorna { veredicto: 'ok'|'retry'|'fallback', razon, tipo_error }.
+// Máx 2 iteraciones; fail-open (veredicto='ok') ante saturación o JSON inválido.
+
+async function supervisorLLM({ accion, toolsUsadas, textoCandidato, iteracion = 1 }) {
+  if (iteracion > 2) {
+    console.warn('[supervisor] Máx iteraciones alcanzado. Fallback.');
+    return { veredicto: 'fallback', razon: 'max_iteraciones', tipo_error: null };
+  }
+
+  const anthropic = new Anthropic();
+
+  const input = agenteMadre.construirInputSupervision({
+    agente:          'modificar',
+    accion_esperada: accion,
+    tools_usadas:    toolsUsadas,
+    texto_agente:    textoCandidato,
+    turno:           iteracion,
+  });
+
+  let response;
+  try {
+    response = await anthropic.messages.create({
+      model:      MODEL,
+      max_tokens: 200,
+      system:     input.system,
+      messages:   input.messages,
+    });
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      console.warn('[supervisor] Saturación. Fail-open OK.');
+      return { veredicto: 'ok', razon: 'fallback_saturacion', tipo_error: null };
+    }
+    throw err;
+  }
+
+  const textBlock = response.content.find(b => b.type === 'text');
+  const texto = textBlock?.text || '';
+
+  const parsed = agenteMadre.parseRespuestaJSON(texto, 'supervision');
+
+  if (!parsed || !parsed.veredicto) {
+    console.warn('[supervisor] JSON inválido. Fail-open OK.');
+    return { veredicto: 'ok', razon: 'json_invalido', tipo_error: null };
+  }
+
+  console.log('[supervisor] veredicto:', parsed.veredicto, '| tipo_error:', parsed.tipo_error);
+  return parsed;
 }
 
 // ─── chatWithNikoStream ────────────────────────────────────────────────────────
