@@ -7,19 +7,11 @@ const { obtenerContextoFinanciero }    = require('./contextoFinanciero');
 
 const MODEL = 'claude-sonnet-4-6';
 
-// ─── Plantillas de mensajes de Niko ante saturación ──────────────────────────
-// Se usan cuando Anthropic devuelve 529, 503, 502 o 504 (errores
-// transitorios). Niko responde "como si estuviera ocupado" en lugar
-// de mostrar error técnico al usuario.
+// ─── Mensaje de incidente (saturación / error transitorio) ───────────────────
+// Se usa cuando Anthropic devuelve 529, 503, 502 o 504.
+// Niko responde de forma empática sin exponer el error técnico.
 
-const PLANTILLAS_SATURACION = [
-  'Disculpa jefe, justo tuve una emergencia en la casa. ¿Hablamos en un rato?',
-  'Se me cayó el internet, jefe. Estoy intentando reconectarme. Vuelve a escribirme en unos minutos.',
-  'Jefe, justo salí un momento, no me puedo conectar bien ahora. Dame unos minutos y retomamos.',
-  'Estoy con un tema personal complicado en este momento, jefe. ¿Podemos retomar en un rato?',
-  'Estoy en un taco horrible, jefe, pero voy en camino. Dame unos minutos y nos conectamos.',
-  'Tuve que salir a hacer un trámite urgente, jefe. ¿Podemos retomar en un rato?',
-];
+const MENSAJE_INCIDENTE = 'Disculpa, parece que se me cayó la señal. ¿Podrías repetir lo que me pediste?';
 
 const STATUS_SATURACION = new Set([529, 503, 502, 504]);
 
@@ -27,9 +19,9 @@ function esErrorSaturacion(err) {
   return err && typeof err.status === 'number' && STATUS_SATURACION.has(err.status);
 }
 
+// Alias mantenido para compatibilidad con todos los call sites del archivo
 function mensajeSaturacionAleatorio() {
-  const i = Math.floor(Math.random() * PLANTILLAS_SATURACION.length);
-  return PLANTILLAS_SATURACION[i];
+  return MENSAJE_INCIDENTE;
 }
 
 // ─── Tool spec para Claude API ────────────────────────────────────────────────
@@ -305,9 +297,24 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
   if (name === 'listar_recordatorios') {
     const { listarRecordatorios } = require('../../routes/recordatorios');
 
+    // Para completados (reactivar): buscar desde el 1er día del mes actual,
+    // ya que los registros completados suelen tener fechas pasadas.
+    // Para pendientes: ventana de 3 días (comportamiento original).
+    let diasAdelante = 3;
+    let fechaDesde   = undefined;
+
+    if (input.completado === true) {
+      const hoy = new Date();
+      fechaDesde   = new Date(hoy.getFullYear(), hoy.getMonth(), 1)
+        .toISOString()
+        .split('T')[0];
+      diasAdelante = 365; // cubrir completados futuros también
+    }
+
     const resultado = await listarRecordatorios({
       empresa_id,
-      dias_adelante:   3,
+      dias_adelante:   diasAdelante,
+      fecha_desde:     fechaDesde,
       titulo_busqueda: input.titulo_busqueda,
       completado:      input.completado,
     });
@@ -326,9 +333,10 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
     }));
 
     return {
-      ok:      true,
-      mensaje: `Encontré ${lista.length} recordatorio${lista.length !== 1 ? 's' : ''}.`,
-      datos:   lista,
+      ok:             true,
+      mensaje:        `Encontré ${lista.length} recordatorio${lista.length !== 1 ? 's' : ''}.`,
+      datos:          lista,
+      scope_completados: input.completado === true ? 'mes_actual' : null,
     };
   }
 
@@ -599,207 +607,6 @@ function detectarIntencionRecordatorio(mensaje, historial) {
   // Niko responderá con auto y preguntará lo que falte. El forzado ocurre en
   // el turno siguiente cuando el usuario responda la pregunta (CASO 1).
   return false;
-}
-
-/**
- * Envía un mensaje a Niko y devuelve su respuesta.
- *
- * @param {string} empresa_id - UUID de la empresa activa (del authMiddleware)
- * @param {string} mensaje    - Texto enviado por el usuario
- * @param {string} user_id    - UUID del usuario autenticado (del authMiddleware)
- * @returns {{ respuesta: string, modelo_usado: string, tokens_usados: number }}
- */
-async function chatWithNiko(empresa_id, mensaje, historial, user_id) {
-  const supabase = getSupabase();
-
-  // ── 1. Cargar datos de la empresa ─────────────────────────────────────────
-  const { data, error } = await supabase
-    .from('empresas')
-    .select('nombre, giro, representante_nombre, representante_rol, tratamiento')
-    .eq('id', empresa_id)
-    .maybeSingle();
-
-  if (error) {
-    console.error(`[niko] Error query empresa ${empresa_id}:`, error.message);
-    throw new Error('No se pudieron cargar los datos de la empresa');
-  }
-
-  if (!data) {
-    console.error(`[niko] Empresa no encontrada: ${empresa_id}`);
-    throw new Error('Empresa no encontrada');
-  }
-
-  // ── 2. Mapear datos con fallbacks seguros ─────────────────────────────────
-  const nombreEmpresa  = data.nombre                 || 'tu empresa';
-  const rubro          = data.giro                   || 'su rubro';
-  const nombreCliente  = data.representante_nombre   || 'cliente';
-  const rolCliente     = data.representante_rol      || 'dueño/a';
-  const tratamiento    = data.tratamiento            || 'tu';
-
-  // ── 3. Obtener contexto financiero ───────────────────────────────────────
-  let contextoFinanciero = null;
-  try {
-    contextoFinanciero = await obtenerContextoFinanciero(empresa_id);
-  } catch (errCtx) {
-    console.error('[niko] Error cargando contexto financiero:', errCtx.message);
-    // Continúa sin contexto financiero — Niko funciona igual, sin datos
-  }
-
-  // ── 4. Construir system prompt base ──────────────────────────────────────
-  const systemPromptBase = buildSystemPrompt({
-    nombreCliente,
-    rolCliente,
-    nombreEmpresa,
-    rubro,
-    tratamiento,
-  });
-
-  // ── 5. Formatear contexto financiero e inyectarlo al prompt ──────────────
-  const tieneContexto = contextoFinanciero && (
-    contextoFinanciero.resumenes_por_mes?.length > 0        ||
-    contextoFinanciero.datos_manuales?.length > 0           ||
-    contextoFinanciero.patrones_pendientes?.length > 0      ||
-    contextoFinanciero.reglas_activas?.length > 0           ||
-    contextoFinanciero.es_primera_sesion === true
-  );
-  const systemPromptFinal = tieneContexto
-    ? systemPromptBase + '\n\n## CONTEXTO FINANCIERO ACTUAL\n\n' + formatearContexto(contextoFinanciero)
-    : systemPromptBase;
-
-  // ── 6. Llamar a Claude (primera ronda, con tools) ────────────────────────
-  const anthropic = new Anthropic();
-
-  const intencionRecordatorio_R1 = detectarIntencionRecordatorio(mensaje, historial);
-  console.log('[chatWithNiko] intencionRecordatorio:', intencionRecordatorio_R1, '| tool_choice:', intencionRecordatorio_R1 ? 'any' : 'auto');
-
-  let response;
-  try {
-    response = await anthropic.messages.create({
-      model:      MODEL,
-      max_tokens: 2000,
-      system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
-      tools:      NIKO_TOOLS,
-      ...(intencionRecordatorio_R1 && { tool_choice: { type: 'any' } }),
-      messages:   [
-        ...(historial || []),
-        { role: 'user', content: mensaje },
-      ],
-    });
-  } catch (err) {
-    if (esErrorSaturacion(err)) {
-      console.warn(`[chatWithNiko] Saturación detectada (${err.status}). Devolviendo plantilla.`);
-      return {
-        respuesta:     mensajeSaturacionAleatorio(),
-        modelo_usado:  null,
-        tokens_usados: 0,
-        tools_usadas:  ['_saturacion'],
-        saturado:      true,
-      };
-    }
-    throw err;
-  }
-
-  let totalInputTokens  = response.usage?.input_tokens  || 0;
-  let totalOutputTokens = response.usage?.output_tokens || 0;
-  const toolsUsadas     = [];
-
-  // ── 7. Tool calling: segunda ronda si Claude pidió usar una tool ──────────
-  if (response.stop_reason === 'tool_use') {
-    const toolUseBlock = response.content.find(b => b.type === 'tool_use');
-
-    if (toolUseBlock) {
-      console.log('[chatWithNiko] Claude pidió tool:', toolUseBlock.name);
-      toolsUsadas.push(toolUseBlock.name);
-
-      const toolResult = await ejecutarTool(toolUseBlock, empresa_id, user_id);
-
-      // Segunda ronda SIN tools para evitar loops
-      let response2;
-      try {
-        response2 = await anthropic.messages.create({
-          model:      MODEL,
-          max_tokens: 2000,
-          system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
-          messages:   [
-            ...(historial || []),
-            { role: 'user',      content: mensaje },
-            { role: 'assistant', content: response.content },
-            {
-              role:    'user',
-              content: [
-                {
-                  type:        'tool_result',
-                  tool_use_id: toolUseBlock.id,
-                  content:     toolResult.ok
-                    ? JSON.stringify({
-                        mensaje: toolResult.mensaje,
-                        ...(toolResult.datos   !== undefined && { datos:   toolResult.datos   }),
-                        ...(toolResult.choques !== undefined && { choques: toolResult.choques }),
-                      })
-                    : `Error: ${toolResult.mensaje}`,
-                },
-              ],
-            },
-          ],
-        });
-      } catch (err) {
-        if (esErrorSaturacion(err)) {
-          console.warn(`[chatWithNiko] Saturación en segunda ronda (${err.status}).`);
-          return {
-            respuesta:     mensajeSaturacionAleatorio(),
-            modelo_usado:  response.model,
-            tokens_usados: totalInputTokens + totalOutputTokens,
-            tools_usadas:  [...toolsUsadas, '_saturacion'],
-            saturado:      true,
-          };
-        }
-        throw err;
-      }
-
-      response = response2;
-
-      totalInputTokens  += response.usage?.input_tokens  || 0;
-      totalOutputTokens += response.usage?.output_tokens || 0;
-    }
-  }
-
-  const textBlock = response.content.find(b => b.type === 'text');
-  const respuesta = textBlock?.text ?? '';
-
-  if (!respuesta || respuesta.trim().length === 0) {
-    console.warn('[nikoService] Respuesta vacía de Claude, usando fallback');
-    return {
-      respuesta:     'Disculpa, hubo un problema. ¿Puedes repetir tu pregunta?',
-      modelo_usado:  MODEL,
-      tokens_usados: totalInputTokens + totalOutputTokens,
-    };
-  }
-
-  // ── 8. Marcar primera conversación completada si corresponde ─────────────
-  // Solo actualiza si era primera sesión — evita writes innecesarios
-  if (contextoFinanciero?.es_primera_sesion === true) {
-    const { error: updateError } = await supabase
-      .from('empresas')
-      .update({ primera_conversacion_niko_completada: true })
-      .eq('id', empresa_id)
-      .eq('primera_conversacion_niko_completada', false);
-
-    if (updateError) {
-      console.warn('[nikoService] No se pudo marcar primera sesión completada:', updateError.message);
-    } else {
-      console.log('[nikoService] Primera sesión de Niko marcada como completada para empresa:', empresa_id);
-    }
-  }
-
-  const tokens_usados = totalInputTokens + totalOutputTokens;
-
-  return {
-    respuesta,
-    modelo_usado:  response.model,
-    tokens_usados,
-    tools_usadas:  toolsUsadas,
-    saturado:      false,
-  };
 }
 
 // ─── chatWithNikoStream ────────────────────────────────────────────────────────
@@ -1248,4 +1055,4 @@ ${topLines}`;
   return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}${bloqueEstado}`;
 }
 
-module.exports = { chatWithNiko, chatWithNikoStream };
+module.exports = { chatWithNikoStream };

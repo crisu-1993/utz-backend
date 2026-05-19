@@ -192,12 +192,12 @@ Negrita SOLO para fechas y horas. Sin emojis excesivos. Sin guiones en títulos 
 
 **Si estás en turno de PREGUNTA** (aún no llamaste la tool):
 <!-- NIKO_TXN:{{TXN_ID}} -->
-<!-- NIKO_STEP:2:modificar_pregunta -->
+<!-- NIKO_STEP:2:modificar_pregunta:accion={{ACCION_CODIGO}} -->
 
 **Si acabas de ejecutar la tool** (turno de cierre):
 <!-- NIKO_TXN:{{TXN_ID}} -->
-<!-- NIKO_STEP:4:tool_ejecutada:{{TOOL_EJECUTADA}} -->
-<!-- NIKO_STEP:5:respuesta_final -->
+<!-- NIKO_STEP:4:tool_ejecutada:{{TOOL_EJECUTADA}}:accion={{ACCION_CODIGO}} -->
+<!-- NIKO_STEP:5:respuesta_final:accion={{ACCION_CODIGO}} -->
 
 ---
 
@@ -250,6 +250,7 @@ function construirInput({ mensaje, historial, txn_id, empresa_context, accion, n
     .replace(/\{\{TXN_ID\}\}/g,          txn_id                         || '')
     .replace(/\{\{FECHA_HOY\}\}/g,       hoy)
     .replace(/\{\{ACCION_TEXTO\}\}/g,    meta.texto)
+    .replace(/\{\{ACCION_CODIGO\}\}/g,   accion                         || '')  // ← encoding para NIKO_STEP
     .replace(/\{\{NIKO_ID\}\}/g,         nikoId                         || '')
     .replace(/\{\{TOOL_EJECUTADA\}\}/g,  meta.tool);
 

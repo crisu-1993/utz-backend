@@ -146,15 +146,15 @@ Negrita SOLO en fechas y horas de recordatorios. Sin guiones ni asteriscos en t�
 
 **Si encontraste 0 items:**
 <!-- NIKO_TXN:{{TXN_ID}} -->
-<!-- NIKO_STEP:1:contexto_sin_items -->
+<!-- NIKO_STEP:1:contexto_sin_items:accion={{ACCION_CODIGO}} -->
 
 **Si encontraste 1 item o resolviste elección de lista (emitiste NIKO_ID):**
 <!-- NIKO_TXN:{{TXN_ID}} -->
-<!-- NIKO_STEP:1:contexto_uuid_resuelto -->
+<!-- NIKO_STEP:1:contexto_uuid_resuelto:accion={{ACCION_CODIGO}} -->
 
 **Si encontraste 2+ items (emitiste NIKO_LIST):**
 <!-- NIKO_TXN:{{TXN_ID}} -->
-<!-- NIKO_STEP:1:contexto_lista_emitida -->
+<!-- NIKO_STEP:1:contexto_lista_emitida:accion={{ACCION_CODIGO}} -->
 
 ---
 
@@ -193,18 +193,19 @@ function construirInput({ mensaje, historial, txn_id, empresa_context, accion })
     : '`listar_recordatorios()`';
 
   const system = SYSTEM_PROMPT
-    .replace(/\{\{NOMBRE_CLIENTE\}\}/g,  empresa_context?.representante || 'jefe')
-    .replace(/\{\{ROL_CLIENTE\}\}/g,     empresa_context?.rol           || 'dueño/a')
-    .replace(/\{\{NOMBRE_EMPRESA\}\}/g,  empresa_context?.nombre        || 'tu empresa')
-    .replace(/\{\{RUBRO\}\}/g,           empresa_context?.giro          || 'su rubro')
-    .replace(/\{\{TRATAMIENTO\}\}/g,     empresa_context?.tratamiento   || 'tu')
-    .replace(/\{\{TXN_ID\}\}/g,          txn_id                         || '')
-    .replace(/\{\{FECHA_HOY\}\}/g,       hoy)
-    .replace(/\{\{ACCION_TEXTO\}\}/g,    cfg.texto)
-    .replace(/\{\{LLAMADA_LISTAR\}\}/g,  llamadaListar)
-    .replace(/\{\{SIN_ITEMS\}\}/g,       cfg.sin_items)
+    .replace(/\{\{NOMBRE_CLIENTE\}\}/g,   empresa_context?.representante || 'jefe')
+    .replace(/\{\{ROL_CLIENTE\}\}/g,      empresa_context?.rol           || 'dueño/a')
+    .replace(/\{\{NOMBRE_EMPRESA\}\}/g,   empresa_context?.nombre        || 'tu empresa')
+    .replace(/\{\{RUBRO\}\}/g,            empresa_context?.giro          || 'su rubro')
+    .replace(/\{\{TRATAMIENTO\}\}/g,      empresa_context?.tratamiento   || 'tu')
+    .replace(/\{\{TXN_ID\}\}/g,           txn_id                         || '')
+    .replace(/\{\{FECHA_HOY\}\}/g,        hoy)
+    .replace(/\{\{ACCION_TEXTO\}\}/g,     cfg.texto)
+    .replace(/\{\{ACCION_CODIGO\}\}/g,    accion)        // ← encoding para NIKO_STEP markers
+    .replace(/\{\{LLAMADA_LISTAR\}\}/g,   llamadaListar)
+    .replace(/\{\{SIN_ITEMS\}\}/g,        cfg.sin_items)
     .replace(/\{\{PREGUNTA_UN_ITEM\}\}/g, cfg.pregunta_un_item)
-    .replace(/\{\{PREGUNTA_LISTA\}\}/g,  cfg.pregunta_lista)
+    .replace(/\{\{PREGUNTA_LISTA\}\}/g,   cfg.pregunta_lista)
     .replace(/\{\{PREGUNTA_ELECCION\}\}/g, cfg.pregunta_eleccion);
 
   return {
