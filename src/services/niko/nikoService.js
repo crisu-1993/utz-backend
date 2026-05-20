@@ -133,9 +133,10 @@ PROHIBIDO: decir que otro sistema busca por ti. Tú eres Niko y tú buscas.`,
           type: 'boolean',
           description: 'Si true, lista solo completados. Si false, solo pendientes. Si se omite, lista todos.',
         },
-        solo_proximos: {
-          type: 'boolean',
-          description: 'Si true, lista SOLO los recordatorios de los próximos 3 días. Si false u omitido, lista todos los que coincidan con los otros filtros (sin límite de fecha).',
+        scope: {
+          type: 'string',
+          enum: ['activos', 'proximos'],
+          description: 'Filtro temporal para pendientes. "activos": recordatorios cuya fecha+hora YA pasó (la alerta ya sonó, falta marcarlos). "proximos": recordatorios cuya fecha+hora aún NO llega (futuros). Solo aplica con completado:false u omitido. Para completados usa completado:true. Para buscar uno por nombre usa titulo_busqueda.',
         },
       },
       required: [],
@@ -339,12 +340,9 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
   if (name === 'listar_recordatorios') {
     const { listarRecordatorios } = require('../../routes/recordatorios');
 
-    // Si solo_proximos=true, limitar a 3 días. Si no, sin límite (null = sin restricción).
-    const diasAdelante = input.solo_proximos === true ? 3 : null;
-
     const resultado = await listarRecordatorios({
       empresa_id,
-      dias_adelante:   diasAdelante,
+      scope:           input.scope,
       titulo_busqueda: input.titulo_busqueda,
       completado:      input.completado,
     });

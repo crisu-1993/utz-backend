@@ -1369,24 +1369,21 @@ Tienes acceso a tres tools adicionales: \`listar_recordatorios\`, \`actualizar_r
 
 ### Regla A — Scope y filtros de listar_recordatorios.
 
-\`listar_recordatorios\` soporta 3 tipos de filtros según el estado del recordatorio:
+\`listar_recordatorios\` distingue 3 tipos de recordatorios según su estado y fecha:
 
-- **ACTIVOS** (todos los pendientes, sin importar fecha): \`completado: false\`
-- **PRÓXIMOS** (pendientes de los próximos 3 días): \`completado: false\` + \`solo_proximos: true\`
-- **COMPLETADOS** (ya realizados): \`completado: true\`
+- **ACTIVOS** (pendientes cuya fecha y hora YA pasaron — la alerta ya sonó, falta marcarlos como hechos): \`scope: "activos"\`
+- **PRÓXIMOS** (pendientes cuya fecha y hora aún NO llegan — son del futuro): \`scope: "proximos"\`
+- **COMPLETADOS** (ya marcados como hechos): \`completado: true\`
 
 **Si el usuario es específico, llama directo a la tool:**
-- "muéstrame los activos" / "qué tengo activo" → ACTIVOS
-- "muéstrame los próximos" / "qué tengo esta semana" → PRÓXIMOS
-- "muéstrame los completados" / "qué ya hice" → COMPLETADOS
+- "muéstrame los activos" / "qué tengo pendiente de marcar" → \`scope: "activos"\`
+- "muéstrame los próximos" / "qué se viene" / "qué tengo esta semana" → \`scope: "proximos"\`
+- "muéstrame los completados" / "qué ya hice" → \`completado: true\`
 
 **Si el usuario es ambiguo** ("muéstrame los recordatorios", "qué tengo agendado"), PREGUNTA primero sin llamar la tool:
-> "¿Cuáles quieres ver: los activos, los próximos (próximos 3 días) o los completados?"
+> "¿Cuáles quieres ver: los activos (ya vencidos, pendientes de marcar), los próximos (los que aún no llegan) o los completados?"
 
 Espera la respuesta y recién entonces llama \`listar_recordatorios\` con el filtro correspondiente.
-
-**Si el usuario pide próximos más allá de 3 días** (ej: "qué tengo el mes que viene"):
-> "No te preocupes, cuando llegue el momento yo te recuerdo. Si quieres adelantarte para tu organización, te invito a revisar directamente en la pestaña /recordatorios > próximos."
 
 ### Regla B — Preservar el id entre turnos con marcador invisible.
 

@@ -194,12 +194,26 @@ router.post('/', authMiddleware, async (req, res) => {
 //
 // @param {object} params
 //   empresa_id      {string}   UUID de la empresa (requerido)
-//   dias_adelante   {number}   Días hacia el futuro a incluir (default 3)
+//   scope           {string?}  "activos" (ya vencidos) | "proximos" (futuros) | omitido (todos)
 //   titulo_busqueda {string?}  Filtro por texto parcial del título
 //   completado      {boolean?} Si viene, filtra por estado completado
 // @returns {object} { ok: true, recordatorios: [...] } | { ok: false, mensaje, status }
 
-async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqueda, completado }) {
+// ─── esRecordatorioActivo (portada del frontend src/lib/recordatorios.ts) ───
+// ACTIVO = pendiente Y (sin fecha O fecha+hora ya pasó en timezone Chile).
+function esRecordatorioActivo(r) {
+  if (r.completado) return false;
+  if (!r.fecha_vencimiento) return true;
+  const ahora = new Date();
+  const fechaChile = ahora.toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
+  const horaChile  = ahora.toLocaleTimeString('en-GB', { timeZone: 'America/Santiago', hour12: false });
+  const ahoraChile = `${fechaChile} ${horaChile}`;
+  const hora = r.hora_vencimiento || '09:00:00';
+  const horaNorm = hora.length === 5 ? `${hora}:00` : hora;
+  return `${r.fecha_vencimiento} ${horaNorm}` <= ahoraChile;
+}
+
+async function listarRecordatorios({ empresa_id, scope, titulo_busqueda, completado }) {
   const supabase = getSupabase();
 
   try {
@@ -218,22 +232,14 @@ async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqu
     }
 
     // RAMA 2: Listado abierto (sin titulo_busqueda).
-    // Si dias_adelante=null → sin filtro de fecha (lista todo).
-    // Si dias_adelante=N   → filtro próximos N días.
+    // Trae todos los registros (límite alto de respaldo) y clasifica en JS.
+    // scope: "activos" = ya vencidos pendientes | "proximos" = futuros pendientes | undefined = todos.
     let query = supabase
       .from('recordatorios')
       .select('*')
       .eq('empresa_id', empresa_id)
       .order('fecha_vencimiento', { ascending: true, nullsFirst: true })
-      .limit(dias_adelante !== null ? 10 : 50);
-
-    if (dias_adelante !== null) {
-      const hoyStr    = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
-      const hoyMs     = new Date(hoyStr + 'T00:00:00Z').getTime();
-      const limiteMs  = hoyMs + dias_adelante * 86400000;
-      const limiteStr = new Date(limiteMs).toISOString().slice(0, 10);
-      query = query.or(`fecha_vencimiento.is.null,fecha_vencimiento.lte.${limiteStr}`);
-    }
+      .limit(200);
 
     if (completado !== undefined) {
       query = query.eq('completado', completado);
@@ -243,7 +249,16 @@ async function listarRecordatorios({ empresa_id, dias_adelante = 3, titulo_busqu
 
     if (error) throw new Error(error.message);
 
-    return { ok: true, recordatorios: data };
+    let recordatorios = data || [];
+
+    // Clasificación temporal en JS (misma lógica que el frontend).
+    if (scope === 'activos') {
+      recordatorios = recordatorios.filter(r => esRecordatorioActivo(r));
+    } else if (scope === 'proximos') {
+      recordatorios = recordatorios.filter(r => !r.completado && !esRecordatorioActivo(r) && !!r.fecha_vencimiento);
+    }
+
+    return { ok: true, recordatorios };
 
   } catch (err) {
     console.error('[recordatorios] Error en listarRecordatorios:', err.message);
