@@ -4,6 +4,16 @@ const Anthropic                        = require('@anthropic-ai/sdk');
 const { createClient }                 = require('@supabase/supabase-js');
 const { buildSystemPrompt }            = require('./systemPrompt');
 const { obtenerContextoFinanciero }    = require('./contextoFinanciero');
+const {
+  esContextoDeEscritura,
+  esContextoNotaSkip,
+  esContextoCrearDirecto,
+  extraerNikoIdActivo,
+  esPreguntaConfirmacionFinal,
+  esRespuestaConfirmatoria,
+  esPhantomDeEscritura,
+  WRITE_TOOLS,
+}                                      = require('./supervisorPhantom');
 
 const MODEL = 'claude-sonnet-4-6';
 
@@ -758,6 +768,38 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
     });
   };
 
+  // ── 6. PREVENTIVO anti-phantom: ¿forzar una tool de escritura específica? ──
+  // Si el usuario confirma una acción ya identificada (NIKO_ID + pregunta final
+  // + confirmación) o declina la nota en flujo crear, se fuerza la tool exacta
+  // para que el modelo NO pueda responder "Listo" sin ejecutarla (anti-phantom).
+  let toolChoiceOverride = null;
+  try {
+    const ultimoAssistantTexto = (() => {
+      const h = historial || [];
+      for (let i = h.length - 1; i >= 0; i--) {
+        if (h[i] && h[i].role === 'assistant') {
+          return typeof h[i].content === 'string' ? h[i].content : '';
+        }
+      }
+      return '';
+    })();
+
+    const nikoCtx = extraerNikoIdActivo(historial);
+    if (nikoCtx
+        && esPreguntaConfirmacionFinal(ultimoAssistantTexto)
+        && esRespuestaConfirmatoria(mensaje)) {
+      toolChoiceOverride = { type: 'tool', name: nikoCtx.toolEsperada };
+    } else if (esContextoNotaSkip(historial, mensaje)) {
+      toolChoiceOverride = { type: 'tool', name: 'crear_recordatorio' };
+    }
+    if (toolChoiceOverride) {
+      console.log('[supervisor] Preventivo: forzando tool', toolChoiceOverride.name);
+    }
+  } catch (errPrev) {
+    console.error('[supervisor] Error en preventivo (se ignora, sigue flujo normal):', errPrev.message);
+    toolChoiceOverride = null;
+  }
+
   // ── 6. RONDA 1: stream con tools ─────────────────────────────────────────
   try {
     const stream1 = anthropic.messages.stream({
@@ -765,6 +807,7 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
       max_tokens: 2000,
       system:     [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
       tools:      NIKO_TOOLS,
+      ...(toolChoiceOverride ? { tool_choice: toolChoiceOverride } : {}),
       messages:   [
         ...(historial || []),
         { role: 'user', content: mensaje },
