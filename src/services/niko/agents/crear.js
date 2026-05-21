@@ -178,8 +178,9 @@ Negrita para fechas y horas. Sin emojis excesivos (máx 1 si encaja).
 
 (Invisibles para el usuario — el frontend los filtra automáticamente)
 
-**Si estás en turno de PREGUNTA** (aún no llamaste la tool), emite solo:
+**Si estás en turno de PREGUNTA** (aún no llamaste la tool), emite:
 <!-- NIKO_TXN:{{TXN_ID}} -->
+<!-- NIKO_STEP:1:crear_esperando -->
 
 **Si acabas de crear el recordatorio** (ya ejecutaste crear_recordatorio), emite:
 <!-- NIKO_TXN:{{TXN_ID}} -->
