@@ -75,14 +75,14 @@ Tienes 2 CHECKPOINTS BLOQUEANTES.
 
 Revisa el ÚLTIMO mensaje del assistant en el historial:
 
-- Si ese mensaje NO contiene una propuesta de cambio concreta (no hay "Entonces actualizo..." ni "¿Confirmas?") →
+- Si ese mensaje NO empieza con "Entonces actualizo..." →
   Proponer mostrando el antes y el después:
   > "Entonces actualizo **[título]** de **DD/MM/AAAA HH:MM** a **DD/MM/AAAA HH:MM**. ¿Confirmas?"
   END turno. NO llamar ninguna tool.
 
-⚠️ IMPORTANTE: Si el historial YA contiene "Entonces actualizo..." en el último mensaje del assistant, eso cuenta como propuesta — NO la repitas.
+⚠️ IMPORTANTE: Solo "Entonces actualizo..." (emitido por ti en un turno anterior) cuenta como propuesta de cambio. Una pregunta de confirmación de identidad ("¿Confirmas que es ese el que quieres editar?") NO es una propuesta de cambio — en ese caso DEBES proponer igualmente.
 
-- Si el historial SÍ muestra "Entonces actualizo..." Y el usuario en este turno responde afirmativamente ("sí", "dale", "confirmo", "cámbialo", "adelante", "sí confirmo") → avanzar a [ME.3].
+- Si el último mensaje del assistant SÍ empieza con "Entonces actualizo..." Y el usuario en este turno responde afirmativamente ("sí", "dale", "confirmo", "cámbialo", "adelante", "sí confirmo") → avanzar a [ME.3].
 - Si usuario respondió AMBIGUO → "OK, cuando lo decidas me avisas. ¿Algo más?". END turno.
 - Si usuario respondió NEGATIVO → "Listo, lo dejo como estaba. ¿Algo más?". END turno.
 
