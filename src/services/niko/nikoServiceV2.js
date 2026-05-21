@@ -26,6 +26,7 @@ const { createClient } = require('@supabase/supabase-js');
 const markers          = require('./agents/markers');
 const supervisor       = require('./supervisor');
 const agenteListar     = require('./agents/listar');
+const agenteCrear      = require('./agents/crear');
 
 const MODEL = 'claude-sonnet-4-6';
 
@@ -675,6 +676,18 @@ async function dispatchListar({ mensaje, historial, txnId, empresa_context, emit
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// BLOQUE 4 — dispatchCrear()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function dispatchCrear({ mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id }) {
+  return await llamarAgente({
+    agenteModule: agenteCrear,
+    input: agenteCrear.construirInput({ mensaje, historial, txn_id: txnId, empresa_context }),
+    emit, empresa_id, user_id,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TODO — BLOQUES PENDIENTES
 // ═══════════════════════════════════════════════════════════════════════════════
 //
@@ -705,4 +718,5 @@ module.exports = {
   mensajeSaturacionAleatorio,
   llamarAgente,
   dispatchListar,
+  dispatchCrear,
 };
