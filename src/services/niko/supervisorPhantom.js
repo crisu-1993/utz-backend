@@ -75,10 +75,23 @@ function esContextoCrearDirecto(mensajeActual) {
   return INTENT_CREAR_REGEX.test(mensajeActual) && FECHA_EXACTA_REGEX.test(mensajeActual);
 }
 
+// Detecta si el último mensaje de Niko preguntó por la nota (independiente de la respuesta del usuario).
+function preguntoNota(historial) {
+  if (!Array.isArray(historial)) return false;
+  let ultimoAssistant = null;
+  for (let i = historial.length - 1; i >= 0; i--) {
+    if (historial[i] && historial[i].role === 'assistant') { ultimoAssistant = historial[i]; break; }
+  }
+  if (!ultimoAssistant) return false;
+  const texto = typeof ultimoAssistant.content === 'string' ? ultimoAssistant.content : '';
+  return /¿le\s+agregamos|descripción|descripcion|alguna\s+nota/i.test(texto);
+}
+
 // Criterio amplio para activar el buffer de streaming (cualquier posible escritura).
+// Incluye: NIKO_ID activo, pregunta de nota (declive O contenido), o crear directo.
 function esContextoDeEscritura(historial, mensajeActual) {
   const tieneNikoId = extraerNikoIdActivo(historial) !== null;
-  return tieneNikoId || esContextoNotaSkip(historial, mensajeActual) || esContextoCrearDirecto(mensajeActual);
+  return tieneNikoId || preguntoNota(historial) || esContextoCrearDirecto(mensajeActual);
 }
 
 // Detección de phantom: afirmó éxito de escritura PERO no hubo tool de escritura.
@@ -94,6 +107,7 @@ module.exports = {
   esPreguntaConfirmacionFinal,
   esRespuestaConfirmatoria,
   esContextoNotaSkip,
+  preguntoNota,
   esContextoCrearDirecto,
   esContextoDeEscritura,
   esPhantomDeEscritura,
