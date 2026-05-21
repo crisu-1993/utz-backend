@@ -951,26 +951,164 @@ async function flujoModificar({ mensaje, historial, txnId, steps, nikoId, nikoLi
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// BLOQUE 7 — routingShortcut() + llamarMadreJSON() + extraerAccionDelTxn()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── routingShortcut ──────────────────────────────────────────────────────────
+//
+// Función PURA de routing sin LLM (0 tokens, 0 latencia).
+// Retorna { intent, accion, confianza, motivo } o null si no puede decidir.
+// Si confianza < 0.85 → el router debe llamar llamarMadreJSON como fallback.
+
+function routingShortcut(mensaje, txnId, steps, nikoId, nikoList, accion) {
+  // ── CAPA 1 — Continuación de TXN activo (confianza 1.0) ─────────────────
+  if (txnId && Array.isArray(steps) && steps.length > 0) {
+
+    // A) NIKO_LIST presente + usuario elige número ordinal
+    if (nikoList && /^(el\s+)?\d+\s*$|el\s+(primero|segundo|tercero)/i.test(mensaje.trim())) {
+      return { intent: 'modificar', accion, confianza: 1.0, motivo: 'eleccion_lista' };
+    }
+
+    // B) NIKO_ID presente + mensaje afirmativo
+    if (nikoId && markers.esMensajeAfirmativo(mensaje)) {
+      return { intent: 'modificar', accion, confianza: 1.0, motivo: 'confirmacion_modificar' };
+    }
+
+    // C) NIKO_ID presente + negativo explícito
+    if (nikoId && /^(no\b|mejor\s+no|cancela|d[eé]jalo|no\s+lo|dejalo)/i.test(mensaje.trim())) {
+      return { intent: 'conversacion', accion: null, confianza: 1.0, motivo: 'cancelacion' };
+    }
+
+    // D) TXN activo sin NIKO_ID (Contexto aún identificando)
+    if (!nikoId && steps.some(s => s.includes('contexto'))) {
+      return { intent: 'modificar', accion, confianza: 0.9, motivo: 'respuesta_contexto' };
+    }
+
+    // E) TXN de crear activo (Crear preguntó descripción/hora/fecha)
+    if (steps.some(s => s.includes('crear'))) {
+      return { intent: 'crear', accion: null, confianza: 0.95, motivo: 'continuar_crear' };
+    }
+  }
+
+  // ── CAPA 2 — Patrones high-confidence sin TXN activo ────────────────────
+  const msg = mensaje.toLowerCase().trim();
+
+  // LISTAR completados (prioridad sobre listar genérico)
+  if (/mu[eé]strame\s+(los\s+)?completados|qu[eé]\s+complet[eé]|recordatorios\s+hechos|los\s+hechos/i.test(msg)) {
+    return { intent: 'listar', accion: 'completados', confianza: 0.95, motivo: 'listar_completados' };
+  }
+
+  // LISTAR pendientes
+  if (/qu[eé]\s+tengo\s+(agendado|pendiente)|qu[eé]\s+recordatorios|mu[eé]strame\s+(los\s+)?recordatorios|lista(me)?\s+los\s+recordatorios|tengo\s+algo\s+pendiente/i.test(msg)) {
+    return { intent: 'listar', accion: 'pendientes', confianza: 0.95, motivo: 'listar_pendientes' };
+  }
+
+  // CREAR
+  if (/ag[eé]ndame\b|recu[eé]rdame\b|crea\s+(un\s+)?recordatorio|anota\s+(un\s+)?recordatorio|pon\s+(un\s+)?recordatorio/i.test(msg)) {
+    return { intent: 'crear', accion: null, confianza: 0.90, motivo: 'crear_explicito' };
+  }
+
+  // MODIFICAR completar
+  if (/marca(r?)\s+.{0,40}(como\s+)?(hecho|completado)|complet(a|ar)\s+.{0,40}|ya\s+hice\b.{0,30}|lo\s+hice\b.{0,30}/i.test(msg)) {
+    return { intent: 'modificar', accion: 'completar', confianza: 0.95, motivo: 'modificar_completar' };
+  }
+
+  // MODIFICAR eliminar
+  if (/elimina(r?)\s+.{0,40}|borra(r?)\s+.{0,40}recordatorio|sac(a|ar)\s+.{0,40}recordatorio|ya\s+no\s+necesito\s+.{0,40}/i.test(msg)) {
+    return { intent: 'modificar', accion: 'eliminar', confianza: 0.95, motivo: 'modificar_eliminar' };
+  }
+
+  // MODIFICAR editar
+  if (/cambia(r?)\s+.{0,30}(a|para|de)\s+.{0,30}|edita(r?)\s+.{0,40}|modifica(r?)\s+.{0,40}|mueve(r?)\s+.{0,40}(al|para\s+el)|actualiza(r?)\s+.{0,40}/i.test(msg)) {
+    return { intent: 'modificar', accion: 'editar', confianza: 0.90, motivo: 'modificar_editar' };
+  }
+
+  // MODIFICAR reactivar
+  if (/reactiva(r?)\s+|vuelve\s+a\s+poner\s+pendiente|desmarca(r?)\s+.{0,40}(como\s+)?hecho|lo\s+dej[eé]\s+pendiente\s+de\s+nuevo/i.test(msg)) {
+    return { intent: 'modificar', accion: 'reactivar', confianza: 0.95, motivo: 'modificar_reactivar' };
+  }
+
+  // ── CAPA 3 — No hay match → necesita Madre LLM ──────────────────────────
+  return null;
+}
+
+// ─── extraerAccionDelTxn ──────────────────────────────────────────────────────
+//
+// Lee los steps del TXN activo y extrae la sub-acción codificada
+// como "accion=X" en los marcadores de Contexto/Modificar.
+
+function extraerAccionDelTxn(steps) {
+  if (!Array.isArray(steps)) return null;
+  for (const step of steps) {
+    const m = step.match(/accion=(\w+)/);
+    if (m) return m[1]; // 'completar' | 'editar' | 'eliminar' | 'reactivar'
+  }
+  return null;
+}
+
+// ─── llamarMadreJSON ──────────────────────────────────────────────────────────
+//
+// Fallback LLM para routing cuando routingShortcut retorna null o confianza < 0.85.
+// Llama a Niko-Madre en modo ROUTING, retorna { intent, accion, confianza, motivo }.
+
+async function llamarMadreJSON({ mensaje, historial, txnId, steps, nikoId, nikoList, accion }) {
+  const anthropic = new Anthropic();
+
+  const nikoListActivo = !!(nikoList && Object.keys(nikoList).length > 0);
+
+  const input = agenteMadre.construirInputRouting({
+    mensaje,
+    historial:        (historial || []).slice(-10), // últimas 10 msgs para Madre
+    txn_activo:       txnId  || null,
+    niko_id_activo:   nikoId || null,
+    niko_list_activo: nikoListActivo,
+    steps_txn:        steps  || [],
+  });
+
+  let response;
+  try {
+    response = await anthropic.messages.create({
+      model:      MODEL,
+      max_tokens: 200,
+      system:     input.system,
+      messages:   input.messages,
+    });
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      console.warn('[madre.routing] Saturación. Fallback a conversacion.');
+      return { intent: 'conversacion', accion: null, confianza: 0.5, motivo: 'fallback_saturacion' };
+    }
+    throw err;
+  }
+
+  const textBlock = response.content.find(b => b.type === 'text');
+  const texto = textBlock?.text || '';
+
+  const parsed = agenteMadre.parseRespuestaJSON(texto, 'routing');
+
+  if (!parsed || !parsed.agente) {
+    console.warn('[madre.routing] JSON inválido o sin agente. Default a conversacion.');
+    return { intent: 'conversacion', accion: null, confianza: 0.5, motivo: 'json_invalido' };
+  }
+
+  console.log('[madre.routing] intent:', parsed.agente, '| accion:', parsed.accion, '| confianza:', parsed.confianza);
+
+  return {
+    intent:    parsed.agente,
+    accion:    parsed.accion    || null,
+    confianza: parsed.confianza || 0.7,
+    motivo:    parsed.razonamiento || 'madre_llm',
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TODO — BLOQUES PENDIENTES
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Bloque 1: supervisor.js (fusión validador.js + supervisorPhantom.js)
-//   → verificarToolEjecutada, verificarDobleRespuesta, verificarVerbalizacion,
-//     verificarBD, esPreguntaConfirmacionFinal, esRespuestaConfirmatoria,
-//     preguntoNota, esPhantomDeEscritura
-//
-// Bloque 2: llamarAgente(agenteModule, input, emit, empresa_id, user_id)
-//   → wrapper genérico R1 buffered + checks supervisor + R2 streamed
-//
-// Bloque 3: agenteListar (agents/listar.js)
-// Bloque 4: agenteCrear (agents/crear.js)
-// Bloque 5: agenteConv (agents/conversacion.js + contextoFinanciero)
-// Bloque 6: flujoModificar (agents/contexto.js + agents/modificar.js + retry)
-// Bloque 7: routingShortcut + llamarMadreJSON (agents/madre.js)
 // Bloque 8: chatWithNikoStreamV2() — función principal exportable
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── Exports (Bloque 0 — infraestructura base) ────────────────────────────────
+// ─── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
   ejecutarTool,
@@ -986,4 +1124,7 @@ module.exports = {
   formatearContexto,
   supervisorLLM,
   flujoModificar,
+  routingShortcut,
+  extraerAccionDelTxn,
+  llamarMadreJSON,
 };
