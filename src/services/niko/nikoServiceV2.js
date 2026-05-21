@@ -25,8 +25,10 @@ const Anthropic        = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 const markers          = require('./agents/markers');
 const supervisor       = require('./supervisor');
-const agenteListar     = require('./agents/listar');
-const agenteCrear      = require('./agents/crear');
+const agenteListar                  = require('./agents/listar');
+const agenteCrear                   = require('./agents/crear');
+const agenteConv                    = require('./agents/conversacion');
+const { obtenerContextoFinanciero } = require('./contextoFinanciero');
 
 const MODEL = 'claude-sonnet-4-6';
 
@@ -688,6 +690,121 @@ async function dispatchCrear({ mensaje, historial, txnId, empresa_context, emit,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// BLOQUE 5 — formatearContexto() + dispatchConv()
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Co-extraída de nikoService.js (función pura: objeto → string).
+// Convierte el resultado de obtenerContextoFinanciero() en texto para el prompt.
+function formatearContexto(contexto) {
+  const {
+    meses_disponibles,
+    ultimo_mes_con_datos,
+    resumenes_por_mes,
+    datos_manuales,
+    patrones_pendientes,
+    reglas_activas,
+    es_primera_sesion,
+  } = contexto;
+
+  const fmt = n => Math.round(n).toLocaleString('es-CL');
+
+  const bloquesMeses = resumenes_por_mes.map(m => {
+    const topLines = m.top_egresos.length > 0
+      ? m.top_egresos.map((e, i) => `    ${i + 1}. ${e.categoria}: $${fmt(e.total)}`).join('\n')
+      : '    (sin egresos categorizados)';
+
+    return `▸ ${m.label}:
+  - Ingresos: $${fmt(m.ingresos)}
+  - Egresos: $${fmt(m.egresos)}
+  - Resultado: $${fmt(m.resultado)}
+  - Margen: ${m.margen_pct}%
+  - Transacciones: ${m.total_transacciones}
+  - Top egresos:
+${topLines}`;
+  });
+
+  // ── Sección datos históricos manuales ─────────────────────────────────────
+  let bloqueManual = '';
+  if (datos_manuales && datos_manuales.length > 0) {
+    const lineas = datos_manuales.map(d => `▸ ${d.periodo}:
+  - Ingresos: $${fmt(d.ingresos)}
+  - Egresos: $${fmt(d.egresos)}
+  - Resultado: $${fmt(d.resultado)}`);
+    bloqueManual = `\n\n═════ DATOS HISTÓRICOS Y MANUALES ═════\n\n${lineas.join('\n\n')}`;
+  }
+
+  // ── Bloque A: Patrones pendientes (score >= 70) ───────────────────────────
+  let bloquePatrones = '';
+  const patronesFiltrados = (patrones_pendientes || []).filter(p => p.score >= 70);
+
+  if (patronesFiltrados.length > 0) {
+    const lineasPatrones = patronesFiltrados.map((p, i) => {
+      const tipo = p.es_mixto
+        ? 'FLUJO MIXTO (entrada y salida) — preguntar diferente'
+        : p.tipo_predominante === 'ingreso'
+          ? 'ingresos'
+          : 'egresos';
+
+      const ejemplos = (p.ejemplos_descripcion || []).slice(0, 2).join(', ');
+
+      return `${i + 1}. "${p.patron}" — score ${p.score}
+   - ${p.veces_aparece} transacciones | $${fmt(p.monto_total)} acumulado
+   - Tipo: ${tipo}
+   - Ejemplos: ${ejemplos}`;
+    });
+
+    bloquePatrones = `\n\n═════ PATRONES PENDIENTES DE CATEGORIZAR ═════\n\n` +
+      `Hay ${patronesFiltrados.length} patrones con alta confianza (score 70+) sin categoría asignada.\n` +
+      `Están ordenados por relevancia (score 0-100).\n\n` +
+      `⚠️  Usa esta información para preguntar al cliente de forma natural cuando sea el momento. ` +
+      `No preguntes por todos en un mismo mensaje. Máximo 1-2 patrones por turno.\n\n` +
+      lineasPatrones.join('\n\n');
+  }
+
+  // ── Bloque B: Reglas ya aprendidas (siempre visible) ─────────────────────
+  let bloqueReglas = '\n\n═════ REGLAS YA APRENDIDAS ═════\n\n';
+
+  if ((reglas_activas || []).length > 0) {
+    const lineasReglas = reglas_activas.map(r => {
+      const contextoAprendido = r.descripcion_aprendida
+        ? ` — "${r.descripcion_aprendida}"`
+        : '';
+      return `- "${r.patron}" → ${r.categoria_nombre} (${r.tipo_patron})${contextoAprendido}`;
+    });
+    bloqueReglas += lineasReglas.join('\n');
+  } else {
+    bloqueReglas += '(sin reglas guardadas todavía)';
+  }
+
+  const encabezado = meses_disponibles.length > 0
+    ? `Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos.label}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`
+    : '(Sin datos bancarios disponibles)';
+
+  // ── Bloque ESTADO DEL CLIENTE ─────────────────────────────────────────────
+  const bloqueEstado = es_primera_sesion === true
+    ? `\n\n═════ ESTADO DEL CLIENTE ═════\n\nes_primera_sesion: true\n→ Usa la presentación formal completa en este mensaje.`
+    : `\n\n═════ ESTADO DEL CLIENTE ═════\n\nes_primera_sesion: false\n→ Cliente recurrente. Saluda de forma casual, sin presentarte.`;
+
+  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}${bloqueEstado}`;
+}
+
+async function dispatchConv({ mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id }) {
+  // Cargar contexto financiero (fail-open: si falla, sigue sin contexto)
+  let ctxTexto = '';
+  try {
+    const ctxObj = await obtenerContextoFinanciero(empresa_id);
+    if (ctxObj) ctxTexto = formatearContexto(ctxObj);
+  } catch (err) {
+    console.error('[dispatchConv] Error cargando contexto financiero:', err.message);
+  }
+  return await llamarAgente({
+    agenteModule: agenteConv,
+    input: agenteConv.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, contexto_financiero: ctxTexto }),
+    emit, empresa_id, user_id,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TODO — BLOQUES PENDIENTES
 // ═══════════════════════════════════════════════════════════════════════════════
 //
@@ -719,4 +836,6 @@ module.exports = {
   llamarAgente,
   dispatchListar,
   dispatchCrear,
+  dispatchConv,
+  formatearContexto,
 };
