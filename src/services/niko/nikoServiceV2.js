@@ -28,6 +28,9 @@ const supervisor       = require('./supervisor');
 const agenteListar                  = require('./agents/listar');
 const agenteCrear                   = require('./agents/crear');
 const agenteConv                    = require('./agents/conversacion');
+const agenteCtx                     = require('./agents/contexto');
+const agenteMod                     = require('./agents/modificar');
+const agenteMadre                   = require('./agents/madre');
 const { obtenerContextoFinanciero } = require('./contextoFinanciero');
 
 const MODEL = 'claude-sonnet-4-6';
@@ -805,6 +808,149 @@ async function dispatchConv({ mensaje, historial, txnId, empresa_context, emit, 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// BLOQUE 6a — supervisorLLM()
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Llama a Niko-Madre en modo SUPERVISIÓN cuando el validador programático
+// detecta posible alucinación y la BD la confirma.
+// Retorna { veredicto: 'ok'|'retry'|'fallback', razon, tipo_error }.
+// Máx 2 iteraciones; fail-open (veredicto='ok') ante saturación o JSON inválido.
+
+async function supervisorLLM({ accion, toolsUsadas, textoCandidato, iteracion = 1 }) {
+  if (iteracion > 2) {
+    console.warn('[supervisor] Máx iteraciones alcanzado. Fallback.');
+    return { veredicto: 'fallback', razon: 'max_iteraciones', tipo_error: null };
+  }
+
+  const anthropic = new Anthropic();
+
+  const input = agenteMadre.construirInputSupervision({
+    agente:          'modificar',
+    accion_esperada: accion,
+    tools_usadas:    toolsUsadas,
+    texto_agente:    textoCandidato,
+    turno:           iteracion,
+  });
+
+  let response;
+  try {
+    response = await anthropic.messages.create({
+      model:      MODEL,
+      max_tokens: 200,
+      system:     input.system,
+      messages:   input.messages,
+    });
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      console.warn('[supervisor] Saturación. Fail-open OK.');
+      return { veredicto: 'ok', razon: 'fallback_saturacion', tipo_error: null };
+    }
+    throw err;
+  }
+
+  const textBlock = response.content.find(b => b.type === 'text');
+  const texto = textBlock?.text || '';
+
+  const parsed = agenteMadre.parseRespuestaJSON(texto, 'supervision');
+
+  if (!parsed || !parsed.veredicto) {
+    console.warn('[supervisor] JSON inválido. Fail-open OK.');
+    return { veredicto: 'ok', razon: 'json_invalido', tipo_error: null };
+  }
+
+  console.log('[supervisor] veredicto:', parsed.veredicto, '| tipo_error:', parsed.tipo_error);
+  return parsed;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BLOQUE 6b — flujoModificar() — fase CONTEXTO (Pasos 1+2)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function flujoModificar({ mensaje, historial, txnId, steps, nikoId, nikoList, accion, empresa_context, empresa_id, user_id, emit }) {
+  // PASO 1 — Resolver UUID (3 fuentes en cascada)
+  let uuid_resuelto = nikoId;
+  // Fuente 2: extraer NIKO_ID del historial (lo emitió el agente contexto en turno anterior)
+  if (!uuid_resuelto && txnId) {
+    uuid_resuelto = markers.extraerNikoIdUltimo(historial, txnId);
+  }
+  // Fuente 3: usuario eligió número de una lista (NIKO_LIST)
+  if (!uuid_resuelto) {
+    uuid_resuelto = markers.resolverEleccionDeLista(historial, txnId, mensaje);
+  }
+
+  // PASO 2 — Sin UUID → fase CONTEXTO (listar + pedir elegir)
+  if (!uuid_resuelto) {
+    return await llamarAgente({
+      agenteModule: agenteCtx,
+      input: agenteCtx.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion }),
+      emit, empresa_id, user_id,
+    });
+  }
+
+  // PASO 3 — Con UUID → fase MODIFICAR (UUID inyectado en el prompt)
+  const resultadoMod = await llamarAgente({
+    agenteModule: agenteMod,
+    input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto }),
+    emit, empresa_id, user_id,
+  });
+
+  // PASO 4 — verificarToolEjecutada (primer check anti-phantom)
+  const accionParaValidador = accion === 'eliminar' ? 'eliminar' : 'actualizar';
+  const checkTool = supervisor.verificarToolEjecutada(resultadoMod.toolsUsadas, accionParaValidador, resultadoMod.texto);
+
+  if (checkTool.ok) {
+    return resultadoMod;  // tool ejecutada de verdad → OK
+  }
+
+  // PASO 5 — Tool NO ejecutada → verificarBD (¿falso positivo del detector?)
+  const tituloMatch = resultadoMod.texto.match(/\*\*(.+?)\*\*/);
+  const tituloParaBD = tituloMatch ? tituloMatch[1] : null;
+  const checkBD = await supervisor.verificarBD(empresa_id, accion, tituloParaBD);
+  if (checkBD.confirmadoEnBD) {
+    console.log('[flujoModificar] verificarBD confirmó: falso positivo, la acción SÍ ocurrió.');
+    return resultadoMod;  // el detector se equivocó, la BD confirma el cambio
+  }
+
+  // PASO 6 — Alucinación confirmada → supervisorLLM + retry (máx 2)
+  for (let iter = 1; iter <= 2; iter++) {
+    const veredicto = await supervisorLLM({
+      accion, toolsUsadas: resultadoMod.toolsUsadas, textoCandidato: resultadoMod.texto, iteracion: iter,
+    });
+
+    if (veredicto.veredicto === 'ok') {
+      console.log('[flujoModificar] supervisorLLM: OK (confiar).');
+      return resultadoMod;
+    }
+
+    if (veredicto.veredicto === 'retry') {
+      console.warn('[flujoModificar] supervisorLLM: RETRY iter', iter, '— forzando tool_choice=any');
+      const retryMod = await llamarAgente({
+        agenteModule: agenteMod,
+        input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto }),
+        emit, empresa_id, user_id, toolChoice: 'any',
+      });
+      const reCheck = supervisor.verificarToolEjecutada(retryMod.toolsUsadas, accionParaValidador, retryMod.texto);
+      if (reCheck.ok) {
+        console.log('[flujoModificar] Retry exitoso: tool ejecutada.');
+        return retryMod;
+      }
+      // si el retry tampoco ejecutó, sigue el loop (iter 2)
+    }
+
+    if (veredicto.veredicto === 'fallback') {
+      console.warn('[flujoModificar] supervisorLLM: FALLBACK.');
+      break;
+    }
+  }
+
+  // PASO 7 — CATÁSTROFE (2 retries sin éxito) → disculpa honesta
+  console.error('[flujoModificar] CATÁSTROFE: no se pudo confirmar la acción tras retries.');
+  const msgCatastrofe = 'Disculpa, tuve un problema al procesar eso. ¿Puedes intentarlo de nuevo?';
+  emit('delta', { texto: msgCatastrofe });
+  return { texto: msgCatastrofe, toolsUsadas: resultadoMod.toolsUsadas, usage: resultadoMod.usage, stopReasonR1: 'catastrofe', saturado: false };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TODO — BLOQUES PENDIENTES
 // ═══════════════════════════════════════════════════════════════════════════════
 //
@@ -838,4 +984,6 @@ module.exports = {
   dispatchCrear,
   dispatchConv,
   formatearContexto,
+  supervisorLLM,
+  flujoModificar,
 };
