@@ -989,6 +989,29 @@ function routingShortcut(mensaje, txnId, steps, nikoId, nikoList, accion) {
 
     // E) TXN de crear activo (Crear preguntó descripción/hora/fecha)
     if (steps.some(s => s.includes('crear'))) {
+      // (1) CANCELACIÓN explícita del crear → soltar y cerrar limpio
+      // Solo frases INEQUÍVOCAS: "olvídalo" o "cancela" no pueden ser respuestas de descripción.
+      // "no" / "no gracias" son respuestas válidas a "¿Le agregamos nota?" → NO cancelan el crear.
+      const esCancelacion =
+        /\bolv[ií]dalo\b/i.test(mensaje) ||
+        /^cancela(r)?\b/i.test(mensaje.trim());
+      if (esCancelacion) {
+        return { intent: 'conversacion', accion: 'cancelar_crear', confianza: 0.9, motivo: 'cancelacion_crear' };
+      }
+
+      // (2) CAMBIO DE TEMA claro (estructura interrogativa/imperativa, no palabras sueltas)
+      const esCambioTemaClaro =
+        /mu[eé]strame\s+(los\s+|mis\s+)?recordatorios/i.test(mensaje) ||
+        /qu[eé]\s+tengo\s+(agendado|pendiente)/i.test(mensaje) ||
+        /qu[eé]\s+(recordatorios|pendientes)\s+(tengo|hay)/i.test(mensaje) ||
+        /lista(me)?\s+(los\s+|mis\s+)?recordatorios/i.test(mensaje) ||
+        /mis\s+recordatorios\s+(pendientes|completos|de\s+hoy)/i.test(mensaje) ||
+        /c[oó]mo\s+(van|est[aá]n?|voy\s+de)\s+(mis\s+)?(venta|finanza|gasto|ingreso|margen)/i.test(mensaje) ||
+        /cu[aá]nto\s+(gast[eé]|cobr[eé]|pagu[eé])/i.test(mensaje);
+
+      if (esCambioTemaClaro) return null; // cae a Capa 2 / Madre LLM → atiende el nuevo tema
+
+      // Caso normal: continuar el crear
       return { intent: 'crear', accion: null, confianza: 0.95, motivo: 'continuar_crear' };
     }
   }
