@@ -791,12 +791,13 @@ ${topLines}`;
   return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}${bloqueEstado}`;
 }
 
-async function dispatchConv({ mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id }) {
-  // Cargar contexto financiero (fail-open: si falla, sigue sin contexto)
+async function dispatchConv({ mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id, ctxObj = null }) {
+  // ctxObj: si viene pre-cargado desde chatWithNikoStreamV2, se reutiliza (evita doble fetch).
+  // Si no viene (llamada directa standalone), se carga aquí. Fail-open en ambos casos.
   let ctxTexto = '';
   try {
-    const ctxObj = await obtenerContextoFinanciero(empresa_id);
-    if (ctxObj) ctxTexto = formatearContexto(ctxObj);
+    const obj = ctxObj || await obtenerContextoFinanciero(empresa_id);
+    if (obj) ctxTexto = formatearContexto(obj);
   } catch (err) {
     console.error('[dispatchConv] Error cargando contexto financiero:', err.message);
   }
@@ -1114,11 +1115,199 @@ async function llamarMadreJSON({ mensaje, historial, txnId, steps, nikoId, nikoL
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// TODO — BLOQUES PENDIENTES
+// BLOQUE 8 — chatWithNikoStreamV2()
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Bloque 8: chatWithNikoStreamV2() — función principal exportable
-// ═══════════════════════════════════════════════════════════════════════════════
+// Función principal que orquesta un turno completo de Niko V2.
+// Misma firma que el monolito (chatWithNikoStream) para que el switch sea
+// transparente: solo cambia el require en la ruta HTTP.
+//
+// Eventos emitidos (mismo contrato que monolito):
+//   delta      → { texto }
+//   tool_start → { tool, input }
+//   tool_end   → { ok, mensaje }
+//   done       → { respuesta, eerr_ampliado_recien_revelado, meta, saturado }
+
+async function chatWithNikoStreamV2({ mensaje, historial, empresa_id, user_id }, emit) {
+  const inicio   = Date.now();
+  const supabase = getSupabase();
+
+  // ─── ETAPA 0 — Cargar empresa_context + contexto financiero (una sola vez) ──
+
+  const { data: empresa, error: empresaError } = await supabase
+    .from('empresas')
+    .select('nombre, giro, representante_nombre, representante_rol, tratamiento')
+    .eq('id', empresa_id)
+    .maybeSingle();
+
+  if (empresaError || !empresa) {
+    console.error('[chatWithNikoStreamV2] Empresa no encontrada:', empresa_id, empresaError?.message);
+    emit('done', {
+      respuesta: 'No pude cargar los datos de tu empresa. Intenta de nuevo.',
+      eerr_ampliado_recien_revelado: false,
+      meta: {}, saturado: false,
+    });
+    return;
+  }
+
+  const empresa_context = {
+    nombre:        empresa.nombre               || 'tu empresa',
+    giro:          empresa.giro                 || 'su rubro',
+    representante: empresa.representante_nombre || 'jefe',
+    rol:           empresa.representante_rol    || 'dueño/a',
+    tratamiento:   empresa.tratamiento          || 'tu',
+  };
+
+  let ctxObjFinanciero = null;
+  try {
+    ctxObjFinanciero = await obtenerContextoFinanciero(empresa_id);
+  } catch (e) {
+    console.error('[chatWithNikoStreamV2] Error contexto financiero:', e.message);
+  }
+
+  // ─── ETAPA 1 — Extraer estado del TXN del historial ──────────────────────────
+
+  let txnId      = markers.extraerTxnActivo(historial);
+  let steps      = txnId ? markers.extraerStepsDelTxn(historial, txnId)      : [];
+  let nikoId     = txnId ? markers.extraerNikoIdUltimo(historial, txnId)     : null;
+  let nikoList   = txnId ? markers.extraerNikoListUltimo(historial, txnId)   : null;
+  let accionPrev = extraerAccionDelTxn(steps);
+  if (!txnId) txnId = markers.generarTxnId();
+
+  console.log('[chatWithNikoStreamV2] TXN:', txnId,
+    '| steps:', steps.length,
+    '| nikoId:', !!nikoId,
+    '| accionPrev:', accionPrev);
+
+  // ─── ETAPA 2 — Routing (shortcut → Madre LLM si null o confianza < 0.85) ────
+
+  let routing = routingShortcut(mensaje, txnId, steps, nikoId, nikoList, accionPrev);
+  if (!routing || routing.confianza < 0.85) {
+    console.log('[chatWithNikoStreamV2] Shortcut insuficiente. Llamando Madre LLM...');
+    routing = await llamarMadreJSON({
+      mensaje, historial, txnId, steps, nikoId, nikoList, accion: accionPrev,
+    });
+  }
+
+  console.log('[chatWithNikoStreamV2] routing:', routing.intent,
+    '| accion:', routing.accion,
+    '| motivo:', routing.motivo,
+    '| confianza:', routing.confianza);
+
+  // ─── ETAPA 3 — Dispatch al agente correcto ───────────────────────────────────
+
+  let resultado;
+
+  switch (routing.intent) {
+
+    case 'crear':
+      resultado = await dispatchCrear({
+        mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id,
+      });
+      break;
+
+    case 'listar':
+      resultado = await dispatchListar({
+        mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id,
+      });
+      break;
+
+    case 'conversacion':
+      resultado = await dispatchConv({
+        mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id,
+        ctxObj: ctxObjFinanciero,   // reutilizar el objeto ya cargado en ETAPA 0
+      });
+      break;
+
+    case 'modificar':
+      resultado = await flujoModificar({
+        mensaje, historial, txnId, steps, nikoId, nikoList,
+        accion:         routing.accion || accionPrev,
+        empresa_context, empresa_id, user_id, emit,
+      });
+      break;
+
+    default:
+      console.warn('[chatWithNikoStreamV2] Intent desconocido:', routing.intent, '→ fallback conversacion');
+      resultado = await dispatchConv({
+        mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id,
+        ctxObj: ctxObjFinanciero,
+      });
+  }
+
+  // ─── ETAPA 4 — Primera sesión ────────────────────────────────────────────────
+  // ctxObjFinanciero ya cargado en ETAPA 0 — sin refetch.
+
+  if (ctxObjFinanciero?.es_primera_sesion === true) {
+    const { error: updateError } = await supabase
+      .from('empresas')
+      .update({ primera_conversacion_niko_completada: true })
+      .eq('id', empresa_id)
+      .eq('primera_conversacion_niko_completada', false);
+
+    if (updateError) {
+      console.warn('[chatWithNikoStreamV2] No se pudo marcar primera sesión:', updateError.message);
+    } else {
+      console.log('[chatWithNikoStreamV2] Primera sesión marcada completada para empresa:', empresa_id);
+    }
+  }
+
+  // ─── ETAPA 5 — Flag EERR Ampliado ────────────────────────────────────────────
+
+  let eerrAmpliadoRecienRevelado = false;
+  try {
+    const { data: flags } = await supabase
+      .from('empresas')
+      .select('eerr_ampliado_revelado, eerr_ampliado_niko_notificado')
+      .eq('id', empresa_id)
+      .maybeSingle();
+
+    if (flags?.eerr_ampliado_revelado && !flags?.eerr_ampliado_niko_notificado) {
+      const { error: updErr } = await supabase
+        .from('empresas')
+        .update({ eerr_ampliado_niko_notificado: true })
+        .eq('id', empresa_id);
+
+      if (!updErr) eerrAmpliadoRecienRevelado = true;
+    }
+  } catch (errFlag) {
+    console.warn('[chatWithNikoStreamV2] Error EERR ampliado flag:', errFlag.message);
+  }
+
+  // ─── ETAPA 6 — Persistir y terminar ──────────────────────────────────────────
+
+  const latencia_ms   = Date.now() - inicio;
+  const tokens_usados = (resultado.usage?.input_tokens || 0) + (resultado.usage?.output_tokens || 0);
+
+  emit('done', {
+    respuesta: resultado.texto,
+    eerr_ampliado_recien_revelado: eerrAmpliadoRecienRevelado,
+    meta: {
+      intent:       routing.intent,
+      accion:       routing.accion,
+      txn_id:       txnId,
+      tools_usadas: resultado.toolsUsadas || [],
+      tokens_usados,
+    },
+    saturado: resultado.saturado || false,
+  });
+
+  // Fire-and-forget: persistir respuesta del assistant
+  supabase
+    .from('niko_conversaciones')
+    .insert({
+      empresa_id,
+      user_id,
+      rol:             'assistant',
+      mensaje:         resultado.texto,
+      tools_invocadas: resultado.toolsUsadas || [],
+      tokens_usados,
+      latencia_ms,
+    })
+    .then(({ error: e }) => {
+      if (e) console.error('[chatWithNikoStreamV2] Error persistiendo conversación:', e.message);
+    });
+}
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
@@ -1139,4 +1328,5 @@ module.exports = {
   routingShortcut,
   extraerAccionDelTxn,
   llamarMadreJSON,
+  chatWithNikoStreamV2,
 };

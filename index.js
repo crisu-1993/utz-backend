@@ -31,6 +31,7 @@ app.use('/api/insights',          require('./src/routes/insights'));
 app.use('/api/fintoc',            require('./src/routes/fintoc'));
 app.use('/api/empresas',          require('./src/routes/empresas'));
 app.use('/api/niko',              require('./src/routes/niko'));
+app.use('/api/niko-v2',           require('./src/routes/nikoV2'));   // ← V2 paralela (switch en Bloque 10)
 app.use('/api/recordatorios',     require('./src/routes/recordatorios'));
 app.use('/api/categorias',        require('./src/routes/categorias'));
 
