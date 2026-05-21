@@ -138,6 +138,10 @@ const PATRONES_PROMESA_ACCION = [
   /listo[,]?\s+(agendado|marcado|completado|eliminado|borrado|actualizado|reactivado)/i,
   // ── Gap C: "X quedó/está [participio]" ──
   /\b(?:qued[oó]|est[aá])\s+(agendado|marcado|completado|eliminado|borrado|actualizado|reactivado)\b/i,
+  // ── Gap D: "Entonces actualizo/cambio..." (propuesta pre-ejecución sin tool) ──
+  /entonces\s+actualizo\b/i,
+  /entonces\s+cambio\b/i,
+  /entonces\s+reactivo\b/i,
 ];
 
 // ─── Regex de contexto de turno (de supervisorPhantom.js) ────────────────────

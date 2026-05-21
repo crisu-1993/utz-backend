@@ -891,7 +891,7 @@ async function flujoModificar({ mensaje, historial, txnId, steps, nikoId, nikoLi
   // PASO 3 — Con UUID → fase MODIFICAR (UUID inyectado en el prompt)
   const resultadoMod = await llamarAgente({
     agenteModule: agenteMod,
-    input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto }),
+    input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto, esConfirmacion: markers.esMensajeAfirmativo(mensaje) }),
     emit, empresa_id, user_id,
   });
 
@@ -1025,7 +1025,7 @@ function routingShortcut(mensaje, txnId, steps, nikoId, nikoList, accion) {
 
   // MODIFICAR editar
   // FIX: agrega "cambia el/la/los X" para casos sin preposición "a/para/de"
-  if (/cambia(r?)\s+.{0,30}(a|para|de)\s+.{0,30}|cambia(r?)\s+(el|la|los|un|una|su)\s+|edita(r?)\s+.{0,40}|modifica(r?)\s+.{0,40}|mueve(r?)\s+.{0,40}(al|para\s+el)|actualiza(r?)\s+.{0,40}/i.test(msg)) {
+  if (/cambia(r?)\s+.{0,30}(a|para|de)\s+.{0,30}|cambia(r?)\s+(el|la|los|un|una|su)\s+|edita(r?)\s+.{0,40}|modifica(r?)\s+.{0,40}|mueve(r?)\s+.{0,40}(al|a\s+las?|para\s+el)|actualiza(r?)\s+.{0,40}|renombra(r?)\s+/i.test(msg)) {
     return { intent: 'modificar', accion: 'editar', confianza: 0.90, motivo: 'modificar_editar' };
   }
 
@@ -1220,6 +1220,7 @@ async function chatWithNikoStreamV2({ mensaje, historial, empresa_id, user_id },
       break;
 
     case 'modificar':
+    case 'contexto':   // madre puede devolver 'contexto' para completar/editar/eliminar/reactivar → es fase 1 de modificar
       resultado = await flujoModificar({
         mensaje, historial, txnId, steps, nikoId, nikoList,
         accion:         routing.accion || accionPrev,

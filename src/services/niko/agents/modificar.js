@@ -71,16 +71,20 @@ Tienes 2 CHECKPOINTS BLOQUEANTES.
 
 - SÍ COMPLETO (campo + valor: "muévelo a las 15:00") → avanzar a [ME.2].
 
-[ME.2] CHECKPOINT BLOQUEANTE — ¿Ya propuse el cambio Y el usuario confirmó en este turno?
+[ME.2] CHECKPOINT BLOQUEANTE — ¿El historial muestra ya una propuesta de cambio concreta Y el usuario está confirmando ahora?
 
-- Si NO propuse el cambio todavía →
+Revisa el ÚLTIMO mensaje del assistant en el historial:
+
+- Si ese mensaje NO contiene una propuesta de cambio concreta (no hay "Entonces actualizo..." ni "¿Confirmas?") →
   Proponer mostrando el antes y el después:
   > "Entonces actualizo **[título]** de **DD/MM/AAAA HH:MM** a **DD/MM/AAAA HH:MM**. ¿Confirmas?"
   END turno. NO llamar ninguna tool.
 
+⚠️ IMPORTANTE: Si el historial YA contiene "Entonces actualizo..." en el último mensaje del assistant, eso cuenta como propuesta — NO la repitas.
+
+- Si el historial SÍ muestra "Entonces actualizo..." Y el usuario en este turno responde afirmativamente ("sí", "dale", "confirmo", "cámbialo", "adelante", "sí confirmo") → avanzar a [ME.3].
 - Si usuario respondió AMBIGUO → "OK, cuando lo decidas me avisas. ¿Algo más?". END turno.
 - Si usuario respondió NEGATIVO → "Listo, lo dejo como estaba. ¿Algo más?". END turno.
-- Si usuario respondió AFIRMATIVO ("sí", "dale", "confirmo", "cámbialo", "adelante") → avanzar a [ME.3].
 
 [ME.3] Emitir tool_use en silencio:
 \`actualizar_recordatorio("{{NIKO_ID}}", { ...cambios })\`
@@ -233,7 +237,7 @@ const ACCION_META = {
  * @param {string} opciones.nikoId           - UUID del recordatorio ya resuelto por el router
  * @returns {{ system: string, messages: Array }}
  */
-function construirInput({ mensaje, historial, txn_id, empresa_context, accion, nikoId }) {
+function construirInput({ mensaje, historial, txn_id, empresa_context, accion, nikoId, esConfirmacion = false }) {
   const meta = ACCION_META[accion] || ACCION_META.completar;
 
   const hoy = new Date().toLocaleDateString('es-CL', {
@@ -241,7 +245,14 @@ function construirInput({ mensaje, historial, txn_id, empresa_context, accion, n
     timeZone: 'America/Santiago',
   });
 
-  const system = SYSTEM_PROMPT
+  // Cuando esConfirmacion=true el usuario ya aprobó el cambio propuesto en el
+  // turno anterior. Se inyecta al INICIO del system prompt (antes del árbol)
+  // para que el LLM vea la instrucción de ejecución antes que los checkpoints.
+  const prefijo = esConfirmacion
+    ? `## INSTRUCCIÓN DE SISTEMA — TURNO DE EJECUCIÓN\n\nEl usuario acaba de confirmar el cambio propuesto. SALTATE los checkpoints [ME.1] y [ME.2]. Ve DIRECTAMENTE a [ME.3] y llama la tool con el UUID de arriba. NO propongas de nuevo. NO pidas más confirmación. Si no ejecutas la tool en este turno, estarás violando una instrucción crítica del sistema.\n\n---\n\n`
+    : '';
+
+  const system = prefijo + SYSTEM_PROMPT
     .replace(/\{\{NOMBRE_CLIENTE\}\}/g,  empresa_context?.representante || 'jefe')
     .replace(/\{\{ROL_CLIENTE\}\}/g,     empresa_context?.rol           || 'dueño/a')
     .replace(/\{\{NOMBRE_EMPRESA\}\}/g,  empresa_context?.nombre        || 'tu empresa')
@@ -250,7 +261,7 @@ function construirInput({ mensaje, historial, txn_id, empresa_context, accion, n
     .replace(/\{\{TXN_ID\}\}/g,          txn_id                         || '')
     .replace(/\{\{FECHA_HOY\}\}/g,       hoy)
     .replace(/\{\{ACCION_TEXTO\}\}/g,    meta.texto)
-    .replace(/\{\{ACCION_CODIGO\}\}/g,   accion                         || '')  // ← encoding para NIKO_STEP
+    .replace(/\{\{ACCION_CODIGO\}\}/g,   accion                         || '')
     .replace(/\{\{NIKO_ID\}\}/g,         nikoId                         || '')
     .replace(/\{\{TOOL_EJECUTADA\}\}/g,  meta.tool);
 
