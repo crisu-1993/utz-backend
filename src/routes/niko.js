@@ -11,7 +11,7 @@
 const express                    = require('express');
 const { createClient }           = require('@supabase/supabase-js');
 const { authMiddleware }         = require('../middleware/auth');
-const { chatWithNikoStream }     = require('../services/niko/nikoService');
+const { chatWithNikoStreamV2 }   = require('../services/niko/nikoServiceV2');
 const { detectarDiagnostico }    = require('./categorias');
 const {
   obtenerRequestId,
@@ -153,7 +153,7 @@ router.post('/chat', authMiddleware, async (req, res) => {
   });
 
   try {
-    await chatWithNikoStream({ mensaje: mensajeTrimmed, historial, empresa_id, user_id }, emit);
+    await chatWithNikoStreamV2({ mensaje: mensajeTrimmed, historial, empresa_id, user_id }, emit);
     if (requestId) marcarFinalizado(requestId);
   } catch (err) {
     if (requestId) limpiarEntrada(requestId);
