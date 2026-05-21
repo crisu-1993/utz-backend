@@ -8,6 +8,7 @@ const {
   esContextoDeEscritura,
   esContextoNotaSkip,
   esContextoCrearDirecto,
+  esIntentModificarSinId,
   extraerNikoIdActivo,
   esPreguntaConfirmacionFinal,
   esRespuestaConfirmatoria,
@@ -800,6 +801,8 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
       toolChoiceOverride = { type: 'tool', name: nikoCtx.toolEsperada };
     } else if (esContextoNotaSkip(historial, mensaje)) {
       toolChoiceOverride = { type: 'tool', name: 'crear_recordatorio' };
+    } else if (esIntentModificarSinId(historial, mensaje)) {
+      toolChoiceOverride = { type: 'tool', name: 'listar_recordatorios' };
     }
     if (toolChoiceOverride) {
       console.log('[supervisor] Preventivo: forzando tool', toolChoiceOverride.name);

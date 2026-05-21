@@ -75,6 +75,22 @@ function esContextoCrearDirecto(mensajeActual) {
   return INTENT_CREAR_REGEX.test(mensajeActual) && FECHA_EXACTA_REGEX.test(mensajeActual);
 }
 
+// Regex de verbos de acción INEQUÍVOCOS sobre recordatorios existentes.
+// Excluye actualiza/modifica/cambia (ambiguos: aplican a empresa, datos, etc.).
+const INTENT_MODIFICAR_REGEX = /\b(elimina|elimíname|eliminame|borra|bórrame|borrame|completa|complétame|completame|marca\s+como|reactiva|reactívame|reactivame)\b/i;
+
+// ¿El usuario pide una acción sobre un recordatorio existente Y todavía NO hay
+// NIKO_ID en el historial? Entonces es el TURNO DE IDENTIFICACIÓN: hay que forzar
+// listar_recordatorios para que el UUID venga de la DB (no de memoria/alucinación).
+function esIntentModificarSinId(historial, mensajeActual) {
+  if (typeof mensajeActual !== 'string') return false;
+  const tieneIntent = INTENT_MODIFICAR_REGEX.test(mensajeActual);
+  if (!tieneIntent) return false;
+  // Solo aplica si NO hay NIKO_ID activo (si ya hay, estamos en turno 2, no identificación).
+  const tieneNikoId = extraerNikoIdActivo(historial) !== null;
+  return !tieneNikoId;
+}
+
 // Detecta si el último mensaje de Niko preguntó por la nota (independiente de la respuesta del usuario).
 function preguntoNota(historial) {
   if (!Array.isArray(historial)) return false;
@@ -109,6 +125,7 @@ module.exports = {
   esContextoNotaSkip,
   preguntoNota,
   esContextoCrearDirecto,
+  esIntentModificarSinId,
   esContextoDeEscritura,
   esPhantomDeEscritura,
 };
