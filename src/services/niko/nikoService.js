@@ -1031,7 +1031,13 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
   }
 
   // ── 10. Armar respuesta completa y emitir done ───────────────────────────
-  let respuestaCompleta = (textoRonda1 + textoRonda2).trim();
+  // Cuando el buffer estaba activo Y Ronda 1 terminó con tool_use, textoRonda1
+  // fue retenido (nunca emitido al cliente) → excluirlo de la persistencia para
+  // no contaminar el historial con texto que el usuario nunca vio (causa degradación).
+  const textoBuffeadoNoMostrado = contextoEscritura && finalMsg1?.stop_reason === 'tool_use';
+  let respuestaCompleta = textoBuffeadoNoMostrado
+    ? textoRonda2.trim()
+    : (textoRonda1 + textoRonda2).trim();
 
   if (!respuestaCompleta) {
     console.warn('[chatWithNikoStream] Respuesta vacía de Claude, usando fallback');
