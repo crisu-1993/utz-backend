@@ -736,6 +736,15 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
   let textoRonda1   = '';
   let textoRonda2   = '';
   let finalMsg1     = null;
+  // Supervisor anti-phantom: ¿este turno es de escritura? Si lo es, el texto
+  // de Ronda 1 se RETIENE (no se emite en vivo) hasta validar que no es phantom.
+  let contextoEscritura = false;
+  try {
+    contextoEscritura = esContextoDeEscritura(historial, mensaje);
+  } catch (e) {
+    console.error('[supervisor] Error en esContextoDeEscritura (se ignora):', e.message);
+    contextoEscritura = false;
+  }
   let modeloUsado   = MODEL;
   let totalInput    = 0;
   let totalOutput   = 0;
@@ -818,7 +827,11 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
       if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
         const chunk = event.delta.text;
         textoRonda1 += chunk;
-        emit('delta', { texto: chunk });
+        // En turnos de escritura, RETENER el texto (no emitir en vivo) hasta
+        // validar que no es phantom. En turnos normales, emitir en vivo (como hoy).
+        if (!contextoEscritura) {
+          emit('delta', { texto: chunk });
+        }
       }
     }
 
@@ -847,6 +860,59 @@ async function chatWithNikoStream({ mensaje, historial, empresa_id, user_id }, e
       return;
     }
     throw err;
+  }
+
+  // ── 6.5 SUPERVISOR CORRECTIVO anti-phantom ────────────────────────────────
+  // Si fue turno de escritura y el modelo terminó SIN tool pero afirmando éxito
+  // (phantom), el texto está RETENIDO (nunca se emitió). Forzar retry con la
+  // tool específica. Si el retry trae tool real, se reemplaza finalMsg1 para que
+  // el flujo normal de tool_use lo procese. Si no, mensaje honesto (nunca "Listo" falso).
+  if (contextoEscritura
+      && finalMsg1.stop_reason !== 'tool_use'
+      && esPhantomDeEscritura(textoRonda1, toolsUsadas)) {
+    console.log('[supervisor] Correctivo: phantom detectado, forzando retry. Texto descartado:', textoRonda1.slice(0, 60));
+    textoRonda1 = '';  // descartar el texto fantasma (nunca se emitió)
+
+    try {
+      const nikoCtxRetry = extraerNikoIdActivo(historial);
+      const toolRetry    = (nikoCtxRetry && nikoCtxRetry.toolEsperada) || 'crear_recordatorio';
+      const retryMsg = await anthropic.messages.create({
+        model:       MODEL,
+        max_tokens:  2000,
+        system:      [{ type: 'text', text: systemPromptFinal, cache_control: { type: 'ephemeral' } }],
+        tools:       NIKO_TOOLS,
+        tool_choice: { type: 'tool', name: toolRetry },
+        messages:    [
+          ...(historial || []),
+          { role: 'user', content: mensaje },
+        ],
+      });
+      const retryBlock = retryMsg.content.find(b => b.type === 'tool_use');
+
+      if (retryBlock && WRITE_TOOLS.includes(retryBlock.name)) {
+        // Retry exitoso → reemplazar finalMsg1 para que el flujo normal de tool_use lo procese
+        console.log('[supervisor] Correctivo: retry OK, tool forzada:', retryBlock.name);
+        finalMsg1 = retryMsg;
+        totalInput  += retryMsg.usage?.input_tokens  || 0;
+        totalOutput += retryMsg.usage?.output_tokens || 0;
+      } else {
+        // Retry falló (no trajo tool de escritura) → mensaje honesto, NUNCA "Listo" falso
+        console.warn('[supervisor] Correctivo: retry NO trajo tool de escritura. Fallback honesto.');
+        const fallback = 'Tuve un problema técnico al ejecutar esa acción. ¿Puedes intentarlo de nuevo?';
+        emit('delta', { texto: fallback });
+        persistirYTerminar({ respuesta: fallback, eerrAmpliado: false });
+        return;
+      }
+    } catch (errRetry) {
+      console.error('[supervisor] Correctivo: error en retry. Fallback honesto.', errRetry.message);
+      const fallback = 'Tuve un problema técnico al ejecutar esa acción. ¿Puedes intentarlo de nuevo?';
+      emit('delta', { texto: fallback });
+      persistirYTerminar({ respuesta: fallback, eerrAmpliado: false });
+      return;
+    }
+  } else if (contextoEscritura && finalMsg1.stop_reason !== 'tool_use' && textoRonda1) {
+    // Turno de escritura, texto LEGÍTIMO retenido (no phantom): liberar el buffer ahora.
+    emit('delta', { texto: textoRonda1 });
   }
 
   // ── 7. Tool calling si Claude lo pidió ───────────────────────────────────
