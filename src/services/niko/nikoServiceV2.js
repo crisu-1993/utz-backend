@@ -24,6 +24,7 @@
 const Anthropic        = require('@anthropic-ai/sdk');
 const { createClient } = require('@supabase/supabase-js');
 const markers          = require('./agents/markers');
+const supervisor       = require('./supervisor');
 
 const MODEL = 'claude-sonnet-4-6';
 
@@ -480,6 +481,187 @@ async function ejecutarTool(toolUseBlock, empresa_id, user_id) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// BLOQUE 2 — llamarAgente()
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Función genérica que ejecuta CUALQUIER agente multi-agente.
+// Maneja R1 (buffered) + R2 (streamed si hay tool call).
+// Aplica verificarDobleRespuesta y verificarVerbalizacion del supervisor.
+//
+// @param {object} agenteModule  - Módulo importado del agente (tiene TOOLS_PERMITIDAS)
+// @param {object} input         - { system, messages } ya construido con construirInput()
+// @param {Function} emit        - función SSE
+// @param {string} empresa_id    - para ejecutarTool
+// @param {string} user_id       - para ejecutarTool
+// @param {string|null} toolChoice - 'auto' | 'any' | null (null = sin tool_choice override)
+// @returns {{ texto, toolsUsadas, usage, stopReasonR1, saturado, toolResult? }}
+
+async function llamarAgente({ agenteModule, input, emit, empresa_id, user_id, toolChoice = null }) {
+  const anthropic = new Anthropic();
+
+  // Filtrar tools a las que el agente tiene permitidas
+  const toolsDelAgente = NIKO_TOOLS.filter(t =>
+    agenteModule.TOOLS_PERMITIDAS.includes(t.name)
+  );
+
+  // ── RONDA 1 — stream buffered ─────────────────────────────────────────────
+  let textoR1 = '';
+  let stream1;
+
+  try {
+    const r1Opts = {
+      model:      MODEL,
+      max_tokens: 2000,
+      system:     [{ type: 'text', text: input.system, cache_control: { type: 'ephemeral' } }],
+      messages:   input.messages,
+    };
+
+    if (toolsDelAgente.length > 0) {
+      r1Opts.tools = toolsDelAgente;
+      if (toolChoice) r1Opts.tool_choice = { type: toolChoice };
+    }
+
+    stream1 = anthropic.messages.stream(r1Opts);
+
+    for await (const event of stream1) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        textoR1 += event.delta.text;
+      }
+    }
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      const msg = mensajeSaturacionAleatorio();
+      emit('delta', { texto: msg });
+      return { texto: msg, toolsUsadas: [], usage: { input_tokens: 0, output_tokens: 0 }, stopReasonR1: 'saturacion', saturado: true };
+    }
+    throw err;
+  }
+
+  const finalMsg1 = await stream1.finalMessage();
+
+  const totalR1Input  = finalMsg1.usage?.input_tokens  || 0;
+  const totalR1Output = finalMsg1.usage?.output_tokens || 0;
+
+  console.log('[llamarAgente] R1 stop_reason:', finalMsg1.stop_reason,
+    '| tokens:', totalR1Input + totalR1Output,
+    '| cache_read:', finalMsg1.usage?.cache_read_input_tokens || 0);
+
+  // CHECK 1: verificarDobleRespuesta — descarta texto pre-tool si corresponde
+  const checkDoble = supervisor.verificarDobleRespuesta(textoR1, finalMsg1.stop_reason);
+  if (!checkDoble.emitir) textoR1 = '';
+
+  // ── Si end_turn → emitir R1 y retornar ───────────────────────────────────
+  if (finalMsg1.stop_reason === 'end_turn') {
+    if (textoR1) {
+      const checkVerb = supervisor.verificarVerbalizacion(textoR1);
+      if (!checkVerb.limpio) {
+        console.warn('[supervisor] Verbalización R1:', checkVerb.fraseDetectada);
+      }
+      emit('delta', { texto: textoR1 });
+    }
+    return {
+      texto:        textoR1,
+      toolsUsadas:  [],
+      usage:        { input_tokens: totalR1Input, output_tokens: totalR1Output },
+      stopReasonR1: 'end_turn',
+      saturado:     false,
+    };
+  }
+
+  // ── Si tool_use → ejecutar tool + Ronda 2 ────────────────────────────────
+  const toolUseBlock = finalMsg1.content.find(b => b.type === 'tool_use');
+
+  if (!toolUseBlock) {
+    console.error('[llamarAgente] stop_reason=tool_use pero no hay tool_use block');
+    return {
+      texto:        '',
+      toolsUsadas:  [],
+      usage:        { input_tokens: totalR1Input, output_tokens: totalR1Output },
+      stopReasonR1: 'error',
+      saturado:     false,
+    };
+  }
+
+  const toolsUsadas = [toolUseBlock.name];
+
+  emit('tool_start', { tool: toolUseBlock.name, input: toolUseBlock.input });
+  const toolResult = await ejecutarTool(toolUseBlock, empresa_id, user_id);
+  emit('tool_end', { ok: toolResult.ok, mensaje: toolResult.mensaje });
+
+  // Serializar tool result para R2
+  const toolResultContent = toolResult.ok
+    ? JSON.stringify({
+        mensaje:    toolResult.mensaje,
+        ...(toolResult.datos            !== undefined && { datos:             toolResult.datos            }),
+        ...(toolResult.choques          !== undefined && { choques:           toolResult.choques          }),
+        ...(toolResult.scope_completados !== undefined && { scope_completados: toolResult.scope_completados }),
+      })
+    : `Error: ${toolResult.mensaje}`;
+
+  // ── RONDA 2 — stream real-time ────────────────────────────────────────────
+  let textoR2  = '';
+  let stream2;
+
+  try {
+    stream2 = anthropic.messages.stream({
+      model:      MODEL,
+      max_tokens: 2000,
+      system:     [{ type: 'text', text: input.system, cache_control: { type: 'ephemeral' } }],
+      // Sin tools en R2 — evita loops
+      messages:   [
+        ...input.messages,
+        { role: 'assistant', content: finalMsg1.content },
+        {
+          role:    'user',
+          content: [{
+            type:        'tool_result',
+            tool_use_id: toolUseBlock.id,
+            content:     toolResultContent,
+          }],
+        },
+      ],
+    });
+
+    for await (const event of stream2) {
+      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+        textoR2 += event.delta.text;
+        emit('delta', { texto: event.delta.text });
+      }
+    }
+  } catch (err) {
+    if (esErrorSaturacion(err)) {
+      const msg = mensajeSaturacionAleatorio();
+      emit('delta', { texto: msg });
+      return { texto: msg, toolsUsadas, usage: { input_tokens: totalR1Input, output_tokens: totalR1Output }, stopReasonR1: 'tool_use', saturado: true };
+    }
+    throw err;
+  }
+
+  const finalMsg2 = await stream2.finalMessage();
+
+  // CHECK 2: verificarVerbalizacion en R2 (log solo, no abortar)
+  const checkVerbR2 = supervisor.verificarVerbalizacion(textoR2);
+  if (!checkVerbR2.limpio) {
+    console.warn('[supervisor] Verbalización R2:', checkVerbR2.fraseDetectada);
+  }
+
+  console.log('[llamarAgente] R2 completo. tokens acumulados:',
+    (totalR1Input + totalR1Output) + (finalMsg2.usage?.input_tokens || 0) + (finalMsg2.usage?.output_tokens || 0));
+
+  return {
+    texto:        textoR2,
+    toolsUsadas,
+    usage: {
+      input_tokens:  totalR1Input  + (finalMsg2.usage?.input_tokens  || 0),
+      output_tokens: totalR1Output + (finalMsg2.usage?.output_tokens || 0),
+    },
+    stopReasonR1: 'tool_use',
+    saturado:     false,
+    toolResult,   // expuesto para que flujoModificar pueda inspeccionar
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TODO — BLOQUES PENDIENTES
 // ═══════════════════════════════════════════════════════════════════════════════
 //
@@ -508,4 +690,5 @@ module.exports = {
   markers,
   esErrorSaturacion,
   mensajeSaturacionAleatorio,
+  llamarAgente,
 };
