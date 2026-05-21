@@ -999,33 +999,45 @@ function routingShortcut(mensaje, txnId, steps, nikoId, nikoList, accion) {
   }
 
   // LISTAR pendientes
-  if (/qu[eé]\s+tengo\s+(agendado|pendiente)|qu[eé]\s+recordatorios|mu[eé]strame\s+(los\s+)?recordatorios|lista(me)?\s+los\s+recordatorios|tengo\s+algo\s+pendiente/i.test(msg)) {
+  // FIX: agrega "mis recordatorios" y "qué pendientes tengo"
+  if (/qu[eé]\s+tengo\s+(agendado|pendiente)|qu[eé]\s+recordatorios|mu[eé]strame\s+(los\s+)?recordatorios|lista(me)?\s+los\s+recordatorios|tengo\s+algo\s+pendiente|mis\s+recordatorios\b|qu[eé]\s+pendientes\s+tengo/i.test(msg)) {
     return { intent: 'listar', accion: 'pendientes', confianza: 0.95, motivo: 'listar_pendientes' };
   }
 
   // CREAR
-  if (/ag[eé]ndame\b|recu[eé]rdame\b|crea\s+(un\s+)?recordatorio|anota\s+(un\s+)?recordatorio|pon\s+(un\s+)?recordatorio/i.test(msg)) {
+  // FIX: agrega "necesito que me recuerdes" y "quiero programar"
+  if (/ag[eé]ndame\b|recu[eé]rdame\b|crea\s+(un\s+)?recordatorio|anota\s+(un\s+)?recordatorio|pon\s+(un\s+)?recordatorio|necesito\s+que\s+me\s+recuerdes?\b|quiero\s+programar\b/i.test(msg)) {
     return { intent: 'crear', accion: null, confianza: 0.90, motivo: 'crear_explicito' };
   }
 
   // MODIFICAR completar
-  if (/marca(r?)\s+.{0,40}(como\s+)?(hecho|completado)|complet(a|ar)\s+.{0,40}|ya\s+hice\b.{0,30}|lo\s+hice\b.{0,30}/i.test(msg)) {
+  // FIX: agrega "ya terminé"
+  if (/marca(r?)\s+.{0,40}(como\s+)?(hecho|completado)|complet(a|ar)\s+.{0,40}|ya\s+hice\b.{0,30}|lo\s+hice\b.{0,30}|ya\s+termin[eé](?=\s|$)/i.test(msg)) {
     return { intent: 'modificar', accion: 'completar', confianza: 0.95, motivo: 'modificar_completar' };
   }
 
   // MODIFICAR eliminar
-  if (/elimina(r?)\s+.{0,40}|borra(r?)\s+.{0,40}recordatorio|sac(a|ar)\s+.{0,40}recordatorio|ya\s+no\s+necesito\s+.{0,40}/i.test(msg)) {
+  // FIX: agrega "borra el/la X" sin requerir la palabra "recordatorio"
+  if (/elimina(r?)\s+.{0,40}|borra(r?)\s+(el|la)\s+|borra(r?)\s+.{0,40}recordatorio|sac(a|ar)\s+.{0,40}recordatorio|ya\s+no\s+necesito\s+.{0,40}/i.test(msg)) {
     return { intent: 'modificar', accion: 'eliminar', confianza: 0.95, motivo: 'modificar_eliminar' };
   }
 
   // MODIFICAR editar
-  if (/cambia(r?)\s+.{0,30}(a|para|de)\s+.{0,30}|edita(r?)\s+.{0,40}|modifica(r?)\s+.{0,40}|mueve(r?)\s+.{0,40}(al|para\s+el)|actualiza(r?)\s+.{0,40}/i.test(msg)) {
+  // FIX: agrega "cambia el/la/los X" para casos sin preposición "a/para/de"
+  if (/cambia(r?)\s+.{0,30}(a|para|de)\s+.{0,30}|cambia(r?)\s+(el|la|los|un|una|su)\s+|edita(r?)\s+.{0,40}|modifica(r?)\s+.{0,40}|mueve(r?)\s+.{0,40}(al|para\s+el)|actualiza(r?)\s+.{0,40}/i.test(msg)) {
     return { intent: 'modificar', accion: 'editar', confianza: 0.90, motivo: 'modificar_editar' };
   }
 
   // MODIFICAR reactivar
   if (/reactiva(r?)\s+|vuelve\s+a\s+poner\s+pendiente|desmarca(r?)\s+.{0,40}(como\s+)?hecho|lo\s+dej[eé]\s+pendiente\s+de\s+nuevo/i.test(msg)) {
     return { intent: 'modificar', accion: 'reactivar', confianza: 0.95, motivo: 'modificar_reactivar' };
+  }
+
+  // CONVERSACION — saludos, finanzas, preguntas generales
+  // FIX: capa 2 no tenía ningún patrón para conversacion → caían todos al LLM.
+  // Posición: al final de capa 2, solo llega aquí si no matcheó nada de recordatorios.
+  if (/\b(hola|gracias|adi[oó]s|buenos\s+(d[ií]as|tardes|noches))\b|\b(margen|finanzas|financiero|financieramente|proveedor|categori[zs]|gast[oéeó]|cobr[eé]|pagué)\b|qu[eé]\s+me\s+recomiend|qu[eé]\s+opinas|c[oó]mo\s+estuvo|c[oó]mo\s+est[aá]\s+(mi|el|la)\b|c[oó]mo\s+voy\b|ay[uú]dame\s+(a\s+)?|expl[ií]came\b|cu[aá]nto\s+(gast[eé]|cobr[eé]|pagu[eé])|entender\s+(mis|los)\s+(gasto|ingreso)/i.test(msg)) {
+    return { intent: 'conversacion', accion: null, confianza: 0.85, motivo: 'conversacion_detectada' };
   }
 
   // ── CAPA 3 — No hay match → necesita Madre LLM ──────────────────────────
