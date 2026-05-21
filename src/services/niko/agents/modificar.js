@@ -249,7 +249,7 @@ function construirInput({ mensaje, historial, txn_id, empresa_context, accion, n
   // turno anterior. Se inyecta al INICIO del system prompt (antes del árbol)
   // para que el LLM vea la instrucción de ejecución antes que los checkpoints.
   const prefijo = esConfirmacion
-    ? `## INSTRUCCIÓN DE SISTEMA — TURNO DE EJECUCIÓN\n\nEl usuario acaba de confirmar el cambio propuesto. SALTATE los checkpoints [ME.1] y [ME.2]. Ve DIRECTAMENTE a [ME.3] y llama la tool con el UUID de arriba. NO propongas de nuevo. NO pidas más confirmación. Si no ejecutas la tool en este turno, estarás violando una instrucción crítica del sistema.\n\n---\n\n`
+    ? `## INSTRUCCIÓN DE SISTEMA — TURNO DE EJECUCIÓN\n\nEl usuario acaba de confirmar el cambio propuesto. SALTATE los checkpoints [ME.1] y [ME.2]. Ve DIRECTAMENTE a [ME.3] y llama la tool con el UUID de arriba. DESPUÉS de ejecutar la tool, CIERRA con el formato de [ME.4]: "Listo, actualicé **[título]**. Ahora queda para el DD/MM/AAAA a las HH:MM. ¿Algo más?" (o el cierre equivalente según la acción). NO propongas de nuevo. NO pidas más confirmación. NUNCA respondas "entiendo que confirmas pero necesito saber" — la acción ya está confirmada, solo ejecuta y cierra claro.\n\n---\n\n`
     : '';
 
   const system = prefijo + SYSTEM_PROMPT

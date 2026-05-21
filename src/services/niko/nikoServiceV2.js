@@ -889,9 +889,11 @@ async function flujoModificar({ mensaje, historial, txnId, steps, nikoId, nikoLi
   }
 
   // PASO 3 — Con UUID → fase MODIFICAR (UUID inyectado en el prompt)
+  // esConfirmacion SOLO si ya hay una propuesta emitida (STEP:2), no en T2 de identificación
+  const hayPropuesta = Array.isArray(steps) && steps.some(s => s.includes('modificar_pregunta'));
   const resultadoMod = await llamarAgente({
     agenteModule: agenteMod,
-    input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto, esConfirmacion: markers.esMensajeAfirmativo(mensaje) }),
+    input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto, esConfirmacion: hayPropuesta && markers.esMensajeAfirmativo(mensaje) }),
     emit, empresa_id, user_id,
   });
 
@@ -927,7 +929,7 @@ async function flujoModificar({ mensaje, historial, txnId, steps, nikoId, nikoLi
       console.warn('[flujoModificar] supervisorLLM: RETRY iter', iter, '— forzando tool_choice=any');
       const retryMod = await llamarAgente({
         agenteModule: agenteMod,
-        input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto }),
+        input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto, esConfirmacion: true }),
         emit, empresa_id, user_id, toolChoice: 'any',
       });
       const reCheck = supervisor.verificarToolEjecutada(retryMod.toolsUsadas, accionParaValidador, retryMod.texto);
