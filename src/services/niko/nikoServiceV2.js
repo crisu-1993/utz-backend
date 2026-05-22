@@ -713,6 +713,29 @@ function formatearContexto(contexto) {
 
   const fmt = n => Math.round(n).toLocaleString('es-CL');
 
+  // ── Mes en curso (zona Chile) ───────────────────────────────────
+  const _ahora = new Date();
+  // Label con formato idéntico a eerr_mensual.label (ej. 'Mayo 2026')
+  const _mesEnCursoLabel = _ahora
+    .toLocaleDateString('es-CL', { month: 'long', year: 'numeric', timeZone: 'America/Santiago' })
+    .replace(/\s+de\s+/, ' ')
+    .replace(/^./, c => c.toUpperCase());
+  // Fecha legible (ej. '22 de mayo de 2026')
+  const _fechaLegible = _ahora.toLocaleDateString('es-CL', {
+    day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Santiago',
+  });
+  // ¿El mes en curso tiene transacciones en eerr_mensual?
+  const _mesEnCursoTieneDatos = eerr_mensual.some(
+    m => m.label === _mesEnCursoLabel && m.total_transacciones > 0
+  );
+  const _infMesEnCurso = _mesEnCursoTieneDatos
+    ? `Hoy es: ${_fechaLegible}
+Mes en curso: ${_mesEnCursoLabel} (este mes SÍ tiene datos cargados — está en el RESUMEN POR MES)
+`
+    : `Hoy es: ${_fechaLegible}
+Mes en curso: ${_mesEnCursoLabel} (este mes todavía NO tiene datos cargados)
+`;
+
   // ── Labels de secciones de egreso (para filtrar top egresos) ─────────────
   const LABELS_EGRESO = new Set(
     JERARQUIA_EERR.filter(j => j.tipo === 'egreso').map(j => j.label)
@@ -812,12 +835,12 @@ ${topLines}${avisoSinCat}`;
   if (mesesConDatos.length > 0) {
     const labelsConDatos  = mesesConDatos.map(m => m.label).join(', ');
     const ultimoLabel     = mesesConDatos[mesesConDatos.length - 1].label;
-    encabezado = `Meses con datos: ${labelsConDatos}\nÚltimo mes con datos: ${ultimoLabel}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`;
+    encabezado = `${_infMesEnCurso}Meses con datos: ${labelsConDatos}\nÚltimo mes con datos: ${ultimoLabel}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`;
   } else if ((meses_disponibles || []).length > 0) {
     // Fallback: hay datos pero fuera de la ventana de 12 meses
-    encabezado = `Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos?.label || ''}\n\n(Datos históricos disponibles pero fuera de ventana de 12 meses)`;
+    encabezado = `${_infMesEnCurso}Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos?.label || ''}\n\n(Datos históricos disponibles pero fuera de ventana de 12 meses)`;
   } else {
-    encabezado = '(Sin datos bancarios disponibles)';
+    encabezado = `${_infMesEnCurso}(Sin datos bancarios disponibles)`;
   }
 
   // ── Bloque FUENTE DE CIFRAS ───────────────────────────────────────────────
