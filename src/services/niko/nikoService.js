@@ -1132,9 +1132,15 @@ ${topLines}`;
     bloqueReglas += '(sin reglas guardadas todavía)';
   }
 
+  // Mes en curso calculado en tiempo de ejecución (zona Chile)
+  const _ahora = new Date();
+  const _mesEnCursoLabel = _ahora.toLocaleDateString('es-CL', {
+    month: 'long', year: 'numeric', timeZone: 'America/Santiago',
+  }).replace(/^./, c => c.toUpperCase()).replace(' de ', ' ');
+
   const encabezado = meses_disponibles.length > 0
-    ? `Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos.label}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`
-    : '(Sin datos bancarios disponibles)';
+    ? `Mes en curso: ${_mesEnCursoLabel}\nMeses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos.label}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`
+    : `Mes en curso: ${_mesEnCursoLabel}\n(Sin datos bancarios disponibles)`;
 
   // ── Bloque ESTADO DEL CLIENTE ─────────────────────────────────────────────
   const bloqueEstado = es_primera_sesion === true

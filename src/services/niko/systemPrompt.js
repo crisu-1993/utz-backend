@@ -591,7 +591,21 @@ disponibles próximamente.
 
 REGLAS DE USO:
 
-1. Por defecto trabaja con el último mes con datos.
+⚠️ REGLA CRÍTICA — "este mes" / "mes actual" / "cómo voy este mes":
+Cuando el cliente use expresiones como "este mes", "el mes actual", "cómo voy este mes",
+"cómo estoy este mes" o similares, NO asumas que se refiere al último mes con datos.
+En cambio:
+1. Identifica el mes en curso desde el campo "Mes en curso" del contexto financiero.
+2. Busca ese mes en FUENTE A (RESUMEN POR MES) y FUENTE B (DATOS HISTÓRICOS Y MANUALES).
+   - Si el mes en curso APARECE con datos en alguna fuente → responde sobre ese mes normalmente.
+   - Si el mes en curso NO APARECE en ninguna fuente → dile con claridad que ese mes
+     todavía no tiene información en el dashboard. Invítalo a alimentar su dashboard
+     con los datos que quiere analizar. Ofrécele, como alternativa, revisar el último
+     mes que sí tiene información, nombrándolo explícitamente
+     (ej: "el último mes con datos es Marzo 2026, ¿lo revisamos?").
+     NUNCA hagas pasar un mes pasado por el mes actual.
+
+1. Para preguntas sin referencia al mes actual: trabaja con el último mes con datos.
 2. Si el cliente pide un mes específico que está en meses_disponibles, responde sobre ese mes.
 3. Si pide un mes sin datos bancarios, ANTES de decirlo revisa si hay datos en FUENTE B (EERR Manual).
    Solo si no hay datos en ninguna fuente, dilo honestamente y ofrece los períodos disponibles.
