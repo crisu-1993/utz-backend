@@ -2,6 +2,12 @@
 
 const { createClient }      = require('@supabase/supabase-js');
 const { detectarPatrones }  = require('../../routes/categorias');
+const {
+  acumularPorCategoria,
+  construirSecciones,
+  calcularSubtotales,
+  serializarSecciones,
+} = require('../eerrCalculator');
 
 function getSupabase() {
   return createClient(
@@ -71,11 +77,61 @@ function calcularResumenMes(transacciones, mes, año) {
   };
 }
 
+// ─── Construir eerr_mensual (últimos N meses) usando eerrCalculator ───────────
+//
+// Produce un array de N objetos mensuales con subtotales contables completos.
+// Meses sin transacciones tienen subtotales en 0 y total_transacciones: 0.
+//
+// @param {Array}  transacciones  - rows de transacciones_historicas (con categoria_id)
+// @param {Array}  categoriasEerr - rows de categorias_eerr
+// @param {number} numMeses       - ventana en meses (default 12)
+// @returns {Array}
+
+function construirEerrMensual(transacciones, categoriasEerr, numMeses = 12) {
+  const ahora = new Date();
+  const meses = [];
+  for (let i = numMeses - 1; i >= 0; i--) {
+    const d = new Date(ahora.getFullYear(), ahora.getMonth() - i, 1);
+    const año = d.getFullYear();
+    const mes = d.getMonth() + 1;
+    const clave = `${año}-${String(mes).padStart(2, '0')}`;
+    meses.push({ año, mes, clave, label: labelMes(año, mes) });
+  }
+
+  // Agrupar transacciones por mes
+  const porMes = {};
+  for (const tx of transacciones) {
+    const clave = tx.fecha_transaccion.substring(0, 7);
+    if (!porMes[clave]) porMes[clave] = [];
+    porMes[clave].push(tx);
+  }
+
+  return meses.map(({ año, mes, clave, label }) => {
+    const txDelMes = porMes[clave] || [];
+    const { montosPorCategoria, sinCategorizarIngreso, sinCategorizarEgreso } =
+      acumularPorCategoria(txDelMes);
+    const secciones = construirSecciones(
+      categoriasEerr, montosPorCategoria, sinCategorizarIngreso, sinCategorizarEgreso
+    );
+    const subtotales    = calcularSubtotales(secciones);
+    const seccionesArray = serializarSecciones(secciones);
+
+    return {
+      mes,
+      año,
+      label,
+      subtotales,
+      secciones: seccionesArray,
+      sin_categorizar: { ingreso: sinCategorizarIngreso, egreso: sinCategorizarEgreso },
+      total_transacciones: txDelMes.length,
+    };
+  });
+}
+
 // ─── Función principal ────────────────────────────────────────────────────────
 
 /**
  * Obtiene el contexto financiero completo de una empresa.
- * Hace queries en paralelo a transacciones_historicas y eerr_manual.
  *
  * @param {string} empresa_id
  * @returns {Promise<object>}
@@ -84,15 +140,22 @@ async function obtenerContextoFinanciero(empresa_id) {
   const supabase = getSupabase();
 
   // ── Queries en paralelo ───────────────────────────────────────────────────
-  const [txResult, manualResult, txPatronesResult, reglasResult, empresaResult] = await Promise.all([
-    // Todas las tx para resúmenes mensuales (existente)
+  const [
+    txResult,
+    manualResult,
+    txPatronesResult,
+    reglasResult,
+    empresaResult,
+    categoriasEerrResult,
+  ] = await Promise.all([
+    // 1. Todas las tx para resúmenes mensuales (PASO 5: añadido categoria_id)
     supabase
       .from('transacciones_historicas')
-      .select('fecha_transaccion, tipo, monto_original, categoria_sugerida_ia')
+      .select('fecha_transaccion, tipo, monto_original, categoria_sugerida_ia, categoria_id')
       .eq('empresa_id', empresa_id)
       .order('fecha_transaccion', { ascending: true }),
 
-    // EERR manual (existente)
+    // 2. EERR manual
     supabase
       .from('eerr_manual')
       .select('anio, mes, ingresos, egresos')
@@ -100,7 +163,7 @@ async function obtenerContextoFinanciero(empresa_id) {
       .order('anio', { ascending: true })
       .order('mes', { ascending: true, nullsFirst: true }),
 
-    // Tx sin categorizar para detector de patrones (nuevo)
+    // 3. Tx sin categorizar para detector de patrones
     supabase
       .from('transacciones_historicas')
       .select('id, descripcion_normalizada, monto_original, tipo, fecha_transaccion')
@@ -108,7 +171,7 @@ async function obtenerContextoFinanciero(empresa_id) {
       .is('categoria_id', null)
       .not('descripcion_normalizada', 'is', null),
 
-    // Reglas activas con nombre de categoría vía FK join (nuevo)
+    // 4. Reglas activas con nombre de categoría vía FK join
     supabase
       .from('reglas_categorizacion')
       .select('patron, tipo_patron, descripcion_aprendida, categorias_eerr(nombre, tipo)')
@@ -116,20 +179,25 @@ async function obtenerContextoFinanciero(empresa_id) {
       .eq('activa', true)
       .order('created_at', { ascending: false }),
 
-    // Flag primera sesión de Niko (2B.11)
+    // 5. Flag primera sesión de Niko
     supabase
       .from('empresas')
       .select('primera_conversacion_niko_completada')
       .eq('id', empresa_id)
       .single(),
+
+    // 6. Categorías EERR para cálculo contable (PASO 6)
+    supabase
+      .from('categorias_eerr')
+      .select('id, nombre, tipo, seccion_eerr, es_sistema, primera_vez_usada_at, ultimo_movimiento_at')
+      .eq('empresa_id', empresa_id)
+      .eq('activa', true),
   ]);
 
   // ── Manejo de errores diferenciado ────────────────────────────────────────
-  // Crítico: sin transacciones históricas el contexto no tiene sentido
   if (txResult.error) {
     throw new Error(`[contextoFinanciero] Error consultando transacciones: ${txResult.error.message}`);
   }
-  // No crítico: Niko funciona sin estos datos (degrada graciosamente)
   if (manualResult.error) {
     console.warn('[contextoFinanciero] Error consultando eerr_manual:', manualResult.error.message);
   }
@@ -142,16 +210,18 @@ async function obtenerContextoFinanciero(empresa_id) {
   if (empresaResult.error) {
     console.warn('[contextoFinanciero] Error consultando empresas (primera sesión):', empresaResult.error.message);
   }
+  if (categoriasEerrResult.error) {
+    console.warn('[contextoFinanciero] Error consultando categorias_eerr:', categoriasEerrResult.error.message);
+  }
 
-  const transacciones = txResult.data   || [];
-  const manualesRaw   = manualResult.data || [];
+  const transacciones  = txResult.data             || [];
+  const manualesRaw    = manualResult.data          || [];
+  const categoriasEerr = categoriasEerrResult.data  || [];
 
   // ── Determinar si es primera sesión con Niko ─────────────────────────────
-  // es_primera_sesion = true  → Niko usa presentación formal
-  // es_primera_sesion = false → Niko usa saludo casual
   const es_primera_sesion = empresaResult.data
     ? !empresaResult.data.primera_conversacion_niko_completada
-    : false;  // safe default: tratar como recurrente si no se pudo leer
+    : false;
 
   // ── Construir patrones_pendientes ─────────────────────────────────────────
   const txPatrones = txPatronesResult.data || [];
@@ -185,10 +255,12 @@ async function obtenerContextoFinanciero(empresa_id) {
   });
 
   if (transacciones.length === 0) {
+    const eerr_mensual = construirEerrMensual([], categoriasEerr);
     return {
       meses_disponibles:    [],
       ultimo_mes_con_datos: null,
       resumenes_por_mes:    [],
+      eerr_mensual,
       datos_manuales,
       patrones_pendientes,
       reglas_activas,
@@ -209,7 +281,7 @@ async function obtenerContextoFinanciero(empresa_id) {
   // ── Ordenar claves cronológicamente ──────────────────────────────────────
   const claves = Object.keys(porMes).sort();
 
-  // ── Calcular resumen por mes ──────────────────────────────────────────────
+  // ── Calcular resumen por mes (legado — coexiste con eerr_mensual) ─────────
   const resumenes_por_mes = claves.map(clave => {
     const [añoStr, mesStr] = clave.split('-');
     const año = parseInt(añoStr, 10);
@@ -228,10 +300,14 @@ async function obtenerContextoFinanciero(empresa_id) {
   // ── Labels de meses disponibles ───────────────────────────────────────────
   const meses_disponibles = resumenes_por_mes.map(r => r.label);
 
+  // ── EERR mensual con lógica contable de eerrCalculator (PASO 6) ───────────
+  const eerr_mensual = construirEerrMensual(transacciones, categoriasEerr);
+
   return {
     meses_disponibles,
     ultimo_mes_con_datos,
     resumenes_por_mes,
+    eerr_mensual,
     datos_manuales,
     patrones_pendientes,
     reglas_activas,
