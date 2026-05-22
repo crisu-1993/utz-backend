@@ -593,6 +593,73 @@ router.delete('/recordatorios/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// ─── POST /api/niko/aviso ────────────────────────────────────────────────────
+//
+// Inserta un aviso de recordatorio en el historial de Niko SIN llamar al LLM.
+// El aviso queda con tipo='aviso' para que el frontend lo excluya del contexto
+// que se envía al modelo, pero lo muestre en pantalla al usuario.
+//
+// Body: { titulo: string, nota?: string }
+// Respuesta: { ok: true, mensaje: string }
+
+router.post('/aviso', authMiddleware, async (req, res) => {
+  const { empresa_id, user_id } = req.auth;
+  const { titulo, nota } = req.body || {};
+
+  // ── Validación ─────────────────────────────────────────────────────────────
+  if (!titulo || typeof titulo !== 'string' || !titulo.trim()) {
+    return res.status(400).json({
+      ok:    false,
+      error: 'El campo "titulo" es requerido y no puede estar vacío',
+    });
+  }
+
+  try {
+    // 1) Obtener nombre del representante para el saludo
+    const { data: empresa, error: empresaErr } = await supabase
+      .from('empresas')
+      .select('representante_nombre')
+      .eq('id', empresa_id)
+      .maybeSingle();
+
+    if (empresaErr) {
+      console.error('[aviso] Error consultando empresa:', empresaErr.message);
+    }
+
+    const nombre = empresa?.representante_nombre || 'Jefe';
+
+    // 2) Componer el mensaje del aviso
+    const tituloTrimmed = titulo.trim();
+    let mensaje = `${nombre}, me pediste recordarte: ${tituloTrimmed}.`;
+    if (nota && typeof nota === 'string' && nota.trim()) {
+      mensaje += ` (Nota: ${nota.trim()})`;
+    }
+
+    // 3) Insertar en niko_conversaciones como aviso
+    const { error: insertErr } = await supabase
+      .from('niko_conversaciones')
+      .insert({
+        empresa_id,
+        user_id,
+        rol:             'assistant',
+        mensaje,
+        tipo:            'aviso',
+        tools_invocadas: [],
+      });
+
+    if (insertErr) {
+      console.error('[aviso] Error insertando aviso:', insertErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al guardar el aviso' });
+    }
+
+    return res.json({ ok: true, mensaje });
+
+  } catch (err) {
+    console.error('[aviso] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
 // ─── GET /api/niko/historial/:empresa_id ─────────────────────────────────────
 //
 // Devuelve el historial completo de conversación con Niko de una empresa.
@@ -625,7 +692,7 @@ router.get('/historial/:empresa_id', authMiddleware, async (req, res) => {
 
     const { data, error } = await supabase
       .from('niko_conversaciones')
-      .select('id, rol, mensaje, tools_invocadas, created_at')
+      .select('id, rol, mensaje, tools_invocadas, tipo, created_at')
       .eq('empresa_id', empresa_id)
       .order('created_at', { ascending: true })
       .limit(limit);
