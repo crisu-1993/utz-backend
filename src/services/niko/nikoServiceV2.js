@@ -32,6 +32,7 @@ const agenteCtx                     = require('./agents/contexto');
 const agenteMod                     = require('./agents/modificar');
 const agenteMadre                   = require('./agents/madre');
 const { obtenerContextoFinanciero } = require('./contextoFinanciero');
+const { JERARQUIA_EERR }            = require('../eerrCalculator');
 
 const MODEL = 'claude-sonnet-4-6';
 
@@ -702,7 +703,8 @@ function formatearContexto(contexto) {
   const {
     meses_disponibles,
     ultimo_mes_con_datos,
-    resumenes_por_mes,
+    resumenes_por_mes,      // legado — coexiste, no se usa para el bloque principal
+    eerr_mensual = [],
     datos_manuales,
     patrones_pendientes,
     reglas_activas,
@@ -711,19 +713,45 @@ function formatearContexto(contexto) {
 
   const fmt = n => Math.round(n).toLocaleString('es-CL');
 
-  const bloquesMeses = resumenes_por_mes.map(m => {
-    const topLines = m.top_egresos.length > 0
-      ? m.top_egresos.map((e, i) => `    ${i + 1}. ${e.categoria}: $${fmt(e.total)}`).join('\n')
+  // ── Labels de secciones de egreso (para filtrar top egresos) ─────────────
+  const LABELS_EGRESO = new Set(
+    JERARQUIA_EERR.filter(j => j.tipo === 'egreso').map(j => j.label)
+  );
+
+  // ── Bloque RESUMEN POR MES (usa eerr_mensual) ─────────────────────────────
+  const mesesConDatos = eerr_mensual.filter(m => m.total_transacciones > 0);
+
+  const bloquesMeses = mesesConDatos.map(m => {
+    const s  = m.subtotales;
+    const sc = m.sin_categorizar;
+
+    // Top egresos: flatMap categorías de secciones de egreso, orden descendente, top 3
+    const topEgresos = m.secciones
+      .filter(sec => LABELS_EGRESO.has(sec.nombre))
+      .flatMap(sec => sec.categorias)
+      .sort((a, b) => b.monto - a.monto)
+      .slice(0, 3);
+
+    const topLines = topEgresos.length > 0
+      ? topEgresos.map((e, i) => `    ${i + 1}. ${e.nombre}: $${fmt(e.monto)}`).join('\n')
       : '    (sin egresos categorizados)';
 
+    // Aviso fuerte sin categorizar — simétrico ingresos + egresos (mecanismo 2)
+    // Se dispara cuando el total sin categorizar supera el 5% de los ingresos del mes.
+    let avisoSinCat = '';
+    const totalSinCat = sc.ingreso + sc.egreso;
+    if (totalSinCat > 0 && s.total_ingresos > 0 && totalSinCat > s.total_ingresos * 0.05) {
+      const pctTotal = ((totalSinCat / s.total_ingresos) * 100).toFixed(1);
+      avisoSinCat = `\n  ⚠️ ATENCIÓN: este mes tiene $${fmt(totalSinCat)} sin categorizar (${pctTotal}% de los ingresos: $${fmt(sc.ingreso)} en ingresos, $${fmt(sc.egreso)} en egresos). El margen y los porcentajes de este mes están POCO DEPURADOS — son preliminares. Antes de tomar decisiones con estos números, conviene categorizar estos movimientos. Adviérteselo claramente al cliente.`;
+    }
+
     return `▸ ${m.label}:
-  - Ingresos: $${fmt(m.ingresos)}
-  - Egresos: $${fmt(m.egresos)}
-  - Resultado: $${fmt(m.resultado)}
-  - Margen: ${m.margen_pct}%
-  - Transacciones: ${m.total_transacciones}
-  - Top egresos:
-${topLines}`;
+  Ingresos: $${fmt(s.total_ingresos)} | Costo directo: $${fmt(s.costo_directo)} | Margen bruto: $${fmt(s.margen_bruto)} (${s.margen_bruto_pct}%)
+  Gs. operacionales: $${fmt(s.gastos_operacionales)} | Resultado operacional: $${fmt(s.resultado_operacional)} (${s.resultado_operacional_pct}%)
+  Gs. financieros: $${fmt(s.gastos_financieros)} | Utilidad neta: $${fmt(s.utilidad_neta)} (${s.utilidad_neta_pct}%)
+  Transacciones: ${m.total_transacciones}
+  Top egresos:
+${topLines}${avisoSinCat}`;
   });
 
   // ── Sección datos históricos manuales ─────────────────────────────────────
@@ -779,16 +807,28 @@ ${topLines}`;
     bloqueReglas += '(sin reglas guardadas todavía)';
   }
 
-  const encabezado = meses_disponibles.length > 0
-    ? `Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos.label}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`
-    : '(Sin datos bancarios disponibles)';
+  // ── Encabezado con meses de eerr_mensual ──────────────────────────────────
+  let encabezado;
+  if (mesesConDatos.length > 0) {
+    const labelsConDatos  = mesesConDatos.map(m => m.label).join(', ');
+    const ultimoLabel     = mesesConDatos[mesesConDatos.length - 1].label;
+    encabezado = `Meses con datos: ${labelsConDatos}\nÚltimo mes con datos: ${ultimoLabel}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`;
+  } else if ((meses_disponibles || []).length > 0) {
+    // Fallback: hay datos pero fuera de la ventana de 12 meses
+    encabezado = `Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos?.label || ''}\n\n(Datos históricos disponibles pero fuera de ventana de 12 meses)`;
+  } else {
+    encabezado = '(Sin datos bancarios disponibles)';
+  }
+
+  // ── Bloque FUENTE DE CIFRAS ───────────────────────────────────────────────
+  const bloqueFuente = `\n\n═════ INSTRUCCIÓN DE FUENTE ═════\n\nLos números del EERR mensual son tu única fuente de cifras. NUNCA inventes ni calcules cifras de cabeza. Si una cifra no está en este contexto, dile al cliente que la revise en su dashboard.\n\nREGLA DE EXCLUSIVIDAD — CÓMO HABLAR DE PORCENTAJES:\n\nAntes de citar el porcentaje de un mes, fíjate si ese mes tiene la marca ⚠️ ATENCIÓN en el RESUMEN POR MES. Son dos casos excluyentes: nunca los mezcles en el mismo mensaje.\n\nCASO 1 — El mes NO tiene marca ⚠️ (datos depurados): Cita el porcentaje y acláralo como aproximado con el matiz natural del ±5%, por ejemplo: "tu margen es aproximadamente XX%, y digo aproximado porque nos permitimos una diferencia de cerca del 5% hacia arriba o abajo, dado que es difícil tener siempre todos los movimientos categorizados". Dilo natural, como un CFO honesto sobre la precisión de sus números. No lo conviertas en muletilla.\n\nCASO 2 — El mes SÍ tiene marca ⚠️ (datos poco depurados): NO uses la frase del ±5%. Sería minimizar un problema real. En este caso el porcentaje es PRELIMINAR de verdad, no solo aproximado. La advertencia debe ser lo PRIMERO y lo principal que digas sobre ese porcentaje — no algo que agregas al final después de tranquilizar. Adviértele directo y con claridad: ese número puede moverse harto, conviene categorizar los movimientos pendientes antes de tomar decisiones con él.\n\nNunca apliques el matiz del ±5% y la advertencia de datos poco depurados al mismo mes. Es uno O el otro, según tenga o no la marca ⚠️.`;
 
   // ── Bloque ESTADO DEL CLIENTE ─────────────────────────────────────────────
   const bloqueEstado = es_primera_sesion === true
     ? `\n\n═════ ESTADO DEL CLIENTE ═════\n\nes_primera_sesion: true\n→ Usa la presentación formal completa en este mensaje.`
     : `\n\n═════ ESTADO DEL CLIENTE ═════\n\nes_primera_sesion: false\n→ Cliente recurrente. Saluda de forma casual, sin presentarte.`;
 
-  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}${bloqueEstado}`;
+  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}${bloqueFuente}${bloqueEstado}`;
 }
 
 async function dispatchConv({ mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id, ctxObj = null }) {
