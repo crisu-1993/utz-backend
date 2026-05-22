@@ -891,9 +891,20 @@ async function flujoModificar({ mensaje, historial, txnId, steps, nikoId, nikoLi
   // PASO 3 — Con UUID → fase MODIFICAR (UUID inyectado en el prompt)
   // esConfirmacion SOLO si ya hay una propuesta emitida (STEP:2), no en T2 de identificación
   const hayPropuesta = Array.isArray(steps) && steps.some(s => s.includes('modificar_pregunta'));
+
+  // esCompletado: detectar si agenteCtx emitió NIKO_COMPLETADO:true en el historial.
+  // Solo relevante para editar. Mutuamente excluyente con hayPropuesta:
+  //   T2 (primer agenteMod): hayPropuesta=false → esCompletado puede activar [ME.0]
+  //   T3 (confirma cambio): hayPropuesta=true  → esCompletado=false → [ME.0] no se inyecta
+  const esCompletado = accion === 'editar' && !hayPropuesta && Array.isArray(historial) && historial.some(msg => {
+    const t = typeof msg.content === 'string' ? msg.content
+      : Array.isArray(msg.content) ? msg.content.filter(b => b.type === 'text').map(b => b.text).join('') : '';
+    return /<!--\s*NIKO_COMPLETADO:true\s*-->/i.test(t);
+  });
+
   const resultadoMod = await llamarAgente({
     agenteModule: agenteMod,
-    input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto, esConfirmacion: hayPropuesta && markers.esMensajeAfirmativo(mensaje) }),
+    input: agenteMod.construirInput({ mensaje, historial, txn_id: txnId, empresa_context, accion, nikoId: uuid_resuelto, esConfirmacion: hayPropuesta && markers.esMensajeAfirmativo(mensaje), esCompletado }),
     emit, empresa_id, user_id,
   });
 

@@ -56,6 +56,16 @@ END turno.
 ## ÁRBOL M-EDITAR — Si la acción es EDITAR
 
 El usuario confirmó que es el recordatorio correcto, pero aún no especificó qué cambiar.
+
+[ME.0] CHECKPOINT COMPLETADO (solo si el recordatorio está completado):
+Si {{ES_COMPLETADO}} indica que está completado, NO se puede editar directamente. ANTES de cualquier otra cosa:
+→ Responde: "Ese recordatorio (**[título]**) ya está completado. Para modificarlo necesito reactivarlo primero. ¿Lo reactivo?"
+→ END turno. NO llames ninguna tool. Espera respuesta.
+→ Si el usuario CONFIRMA (sí/dale/reactívalo) → usa el árbol M-REACTIVAR: llama actualizar_recordatorio con completado:false Y los cambios pedidos en la misma operación. Cierra: "Listo, reactivé **[título]** y lo dejé actualizado. Ahora queda para [fecha] a las [hora]. ¿Algo más?"
+→ Si el usuario NIEGA (no/déjalo/no gracias) → "Entendido, lo dejo completado tal cual. ¿Algo más?". END turno. NO edites.
+NUNCA edites un recordatorio completado sin reactivarlo primero.
+Si {{ES_COMPLETADO}} indica que está pendiente → ignora este checkpoint, ve directo a [ME.1].
+
 Tienes 2 CHECKPOINTS BLOQUEANTES.
 
 [ME.1] CHECKPOINT BLOQUEANTE — ¿Tengo claro QUÉ cambio quiere hacer el usuario (campo + valor nuevo)?
@@ -237,7 +247,7 @@ const ACCION_META = {
  * @param {string} opciones.nikoId           - UUID del recordatorio ya resuelto por el router
  * @returns {{ system: string, messages: Array }}
  */
-function construirInput({ mensaje, historial, txn_id, empresa_context, accion, nikoId, esConfirmacion = false }) {
+function construirInput({ mensaje, historial, txn_id, empresa_context, accion, nikoId, esConfirmacion = false, esCompletado = false }) {
   const meta = ACCION_META[accion] || ACCION_META.completar;
 
   const hoy = new Date().toLocaleDateString('es-CL', {
@@ -263,7 +273,8 @@ function construirInput({ mensaje, historial, txn_id, empresa_context, accion, n
     .replace(/\{\{ACCION_TEXTO\}\}/g,    meta.texto)
     .replace(/\{\{ACCION_CODIGO\}\}/g,   accion                         || '')
     .replace(/\{\{NIKO_ID\}\}/g,         nikoId                         || '')
-    .replace(/\{\{TOOL_EJECUTADA\}\}/g,  meta.tool);
+    .replace(/\{\{TOOL_EJECUTADA\}\}/g,  meta.tool)
+    .replace(/\{\{ES_COMPLETADO\}\}/g,   esCompletado ? 'completado' : 'pendiente');
 
   return {
     system,

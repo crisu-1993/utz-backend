@@ -25,9 +25,10 @@ const ACCION_CONFIG = {
   },
   editar: {
     texto:               'EDITAR (modificar contenido)',
-    listar_completado:   false,
-    sin_items:           'No encuentro recordatorios pendientes para editar.',
+    listar_completado:   false,  // genera listar_recordatorios() sin arg → route devuelve TODOS (pending + completed)
+    sin_items:           'No encuentro recordatorios para editar.',
     pregunta_un_item:    '¿Te refieres a **[título]** del **DD/MM/AAAA** a las **HH:MM**? ¿Confirmas que es ese el que quieres editar?',
+    pregunta_un_item_completado: 'Ese recordatorio (**[título]** del **DD/MM/AAAA** a las **HH:MM**) ya está completado. ¿Es este el que quieres editar?',
     pregunta_lista:      '¿Cuál quieres editar?',
     pregunta_eleccion:   '¿Confirmas que es **[título]** del **DD/MM/AAAA** a las **HH:MM** el que quieres editar?',
   },
@@ -86,6 +87,8 @@ END turno.
 Mostrar identificación + confirmación de acción en UNA sola pregunta:
 "{{PREGUNTA_UN_ITEM}}"
 (reemplaza [título], DD/MM/AAAA y HH:MM con los valores reales del recordatorio)
+
+{{NOTA_COMPLETADO_EDITAR}}
 
 Al FINAL del mensaje, incluir marcador invisible:
 \`<!-- NIKO_ID:[uuid-del-recordatorio] -->\`
@@ -192,21 +195,32 @@ function construirInput({ mensaje, historial, txn_id, empresa_context, accion })
     ? '`listar_recordatorios({ completado: true })`'
     : '`listar_recordatorios()`';
 
+  // Solo para editar: instrucción de priorizar pendientes y manejar completados.
+  // Para las demás acciones: cadena vacía (el placeholder desaparece del prompt).
+  const notaCompletadoEditar = cfg.pregunta_un_item_completado
+    ? `⚠️ Si los resultados incluyen ítems con \`completado:true\`, son candidatos válidos.\n` +
+      `• Prioriza pendientes: si hay tanto un pendiente como un completado con nombre similar, elige el pendiente.\n` +
+      `• Si el único ítem (o el ítem elegido) tiene \`completado:true\`, usa ESTE texto en lugar del anterior:\n` +
+      `  "${cfg.pregunta_un_item_completado}"\n` +
+      `  Y añade DESPUÉS del marcador NIKO_ID: \`<!-- NIKO_COMPLETADO:true -->\``
+    : '';
+
   const system = SYSTEM_PROMPT
-    .replace(/\{\{NOMBRE_CLIENTE\}\}/g,   empresa_context?.representante || 'jefe')
-    .replace(/\{\{ROL_CLIENTE\}\}/g,      empresa_context?.rol           || 'dueño/a')
-    .replace(/\{\{NOMBRE_EMPRESA\}\}/g,   empresa_context?.nombre        || 'tu empresa')
-    .replace(/\{\{RUBRO\}\}/g,            empresa_context?.giro          || 'su rubro')
-    .replace(/\{\{TRATAMIENTO\}\}/g,      empresa_context?.tratamiento   || 'tu')
-    .replace(/\{\{TXN_ID\}\}/g,           txn_id                         || '')
-    .replace(/\{\{FECHA_HOY\}\}/g,        hoy)
-    .replace(/\{\{ACCION_TEXTO\}\}/g,     cfg.texto)
-    .replace(/\{\{ACCION_CODIGO\}\}/g,    accion)        // ← encoding para NIKO_STEP markers
-    .replace(/\{\{LLAMADA_LISTAR\}\}/g,   llamadaListar)
-    .replace(/\{\{SIN_ITEMS\}\}/g,        cfg.sin_items)
-    .replace(/\{\{PREGUNTA_UN_ITEM\}\}/g, cfg.pregunta_un_item)
-    .replace(/\{\{PREGUNTA_LISTA\}\}/g,   cfg.pregunta_lista)
-    .replace(/\{\{PREGUNTA_ELECCION\}\}/g, cfg.pregunta_eleccion);
+    .replace(/\{\{NOMBRE_CLIENTE\}\}/g,         empresa_context?.representante || 'jefe')
+    .replace(/\{\{ROL_CLIENTE\}\}/g,            empresa_context?.rol           || 'dueño/a')
+    .replace(/\{\{NOMBRE_EMPRESA\}\}/g,         empresa_context?.nombre        || 'tu empresa')
+    .replace(/\{\{RUBRO\}\}/g,                  empresa_context?.giro          || 'su rubro')
+    .replace(/\{\{TRATAMIENTO\}\}/g,            empresa_context?.tratamiento   || 'tu')
+    .replace(/\{\{TXN_ID\}\}/g,                 txn_id                         || '')
+    .replace(/\{\{FECHA_HOY\}\}/g,              hoy)
+    .replace(/\{\{ACCION_TEXTO\}\}/g,           cfg.texto)
+    .replace(/\{\{ACCION_CODIGO\}\}/g,          accion)        // ← encoding para NIKO_STEP markers
+    .replace(/\{\{LLAMADA_LISTAR\}\}/g,         llamadaListar)
+    .replace(/\{\{SIN_ITEMS\}\}/g,              cfg.sin_items)
+    .replace(/\{\{PREGUNTA_UN_ITEM\}\}/g,       cfg.pregunta_un_item)
+    .replace(/\{\{NOTA_COMPLETADO_EDITAR\}\}/g, notaCompletadoEditar)
+    .replace(/\{\{PREGUNTA_LISTA\}\}/g,         cfg.pregunta_lista)
+    .replace(/\{\{PREGUNTA_ELECCION\}\}/g,      cfg.pregunta_eleccion);
 
   return {
     system,
