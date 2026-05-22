@@ -724,10 +724,14 @@ function formatearContexto(contexto) {
   const _fechaLegible = _ahora.toLocaleDateString('es-CL', {
     day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Santiago',
   });
-  // ¿El mes en curso tiene transacciones en eerr_mensual?
-  const _mesEnCursoTieneDatos = eerr_mensual.some(
+  // ¿El mes en curso tiene datos bancarios O datos manuales mensuales?
+  const _mesEnCursoTieneDatosBancario = eerr_mensual.some(
     m => m.label === _mesEnCursoLabel && m.total_transacciones > 0
   );
+  const _mesEnCursoTieneDatosManual = (datos_manuales || []).some(
+    d => d.mes !== null && d.periodo === _mesEnCursoLabel
+  );
+  const _mesEnCursoTieneDatos = _mesEnCursoTieneDatosBancario || _mesEnCursoTieneDatosManual;
   const _infMesEnCurso = _mesEnCursoTieneDatos
     ? `Hoy es: ${_fechaLegible}
 Mes en curso: ${_mesEnCursoLabel} (este mes SÍ tiene datos cargados — está en el RESUMEN POR MES)
@@ -780,10 +784,12 @@ ${topLines}${avisoSinCat}`;
   // ── Sección datos históricos manuales ─────────────────────────────────────
   let bloqueManual = '';
   if (datos_manuales && datos_manuales.length > 0) {
-    const lineas = datos_manuales.map(d => `▸ ${d.periodo}:
-  - Ingresos: $${fmt(d.ingresos)}
-  - Egresos: $${fmt(d.egresos)}
-  - Resultado: $${fmt(d.resultado)}`);
+    const lineas = datos_manuales.map(d => {
+      const marca = d.mes !== null
+        ? '(DATOS MANUALES — solo resultado simple, SIN desglose de márgenes)'
+        : '(ANUAL — solo resultado simple)';
+      return `▸ ${d.periodo} ${marca}:\n  - Ingresos: $${fmt(d.ingresos)}\n  - Egresos: $${fmt(d.egresos)}\n  - Resultado: $${fmt(d.resultado)}`;
+    });
     bloqueManual = `\n\n═════ DATOS HISTÓRICOS Y MANUALES ═════\n\n${lineas.join('\n\n')}`;
   }
 
@@ -830,21 +836,59 @@ ${topLines}${avisoSinCat}`;
     bloqueReglas += '(sin reglas guardadas todavía)';
   }
 
-  // ── Encabezado con meses de eerr_mensual ──────────────────────────────────
+  // ── Encabezado combinado: bancarios + manuales mensuales ─────────────────
+  // Meses manuales mensuales (excluye anuales que van solo al bloque histórico)
+  const mesesManualesMensuales = (datos_manuales || []).filter(d => d.mes !== null);
+
+  // Lista unificada ordenada cronológicamente (año-mes ASC).
+  // Si un mes aparece en ambas fuentes (bancario y manual), bancario gana (más detalle).
+  const _todosLosMesesRaw = [
+    ...mesesConDatos.map(m => ({ label: m.label, anio: m['áno'], mes: m.mes, tipo: 'bancario' })),
+    ...mesesManualesMensuales.map(d => ({ label: d.periodo, anio: d.anio, mes: d.mes, tipo: 'manual' })),
+  ];
+  _todosLosMesesRaw.sort((a, b) => a.anio !== b.anio ? a.anio - b.anio : a.mes - b.mes);
+  const _labelsVistos = new Set();
+  const _todosLosMeses = [];
+  for (const m of _todosLosMesesRaw) {
+    if (!_labelsVistos.has(m.label)) {
+      _labelsVistos.add(m.label);
+      _todosLosMeses.push(m);
+    }
+  }
+
+  // Último mes con información (el más reciente entre bancarios y manuales)
+  const _ultimoMesConInfo = _todosLosMeses.length > 0
+    ? _todosLosMeses[_todosLosMeses.length - 1]
+    : null;
+
+  // Menú de meses con información disponible
+  const _lineasMeses = _todosLosMeses.map(m =>
+    m.tipo === 'bancario'
+      ? `  - ${m.label} (datos completos — con desglose de márgenes)`
+      : `  - ${m.label} (datos manuales — solo resultado simple)`
+  );
+  const _listaMeses = _lineasMeses.length > 0
+    ? `Meses con información disponible (en orden):\n${_lineasMeses.join('\n')}`
+    : 'Meses con información disponible: (ninguno todavía)';
+  const _ultimoInfo = _ultimoMesConInfo
+    ? `\nÚltimo mes con información: ${_ultimoMesConInfo.label}`
+    : '';
+
   let encabezado;
-  if (mesesConDatos.length > 0) {
-    const labelsConDatos  = mesesConDatos.map(m => m.label).join(', ');
-    const ultimoLabel     = mesesConDatos[mesesConDatos.length - 1].label;
-    encabezado = `${_infMesEnCurso}Meses con datos: ${labelsConDatos}\nÚltimo mes con datos: ${ultimoLabel}\n\n═════ RESUMEN POR MES ═════\n\n${bloquesMeses.join('\n\n')}`;
+  if (_todosLosMeses.length > 0) {
+    const _bloqueResumen = mesesConDatos.length > 0
+      ? `\n\n═════ RESUMEN POR MES (datos bancarios completos) ═════\n\n${bloquesMeses.join('\n\n')}`
+      : '';
+    encabezado = `${_infMesEnCurso}${_listaMeses}${_ultimoInfo}${_bloqueResumen}`;
   } else if ((meses_disponibles || []).length > 0) {
-    // Fallback: hay datos pero fuera de la ventana de 12 meses
-    encabezado = `${_infMesEnCurso}Meses con datos: ${meses_disponibles.join(', ')}\nÚltimo mes con datos: ${ultimo_mes_con_datos?.label || ''}\n\n(Datos históricos disponibles pero fuera de ventana de 12 meses)`;
+    // Fallback: datos bancarios fuera de ventana de 12 meses, sin manuales recientes
+    encabezado = `${_infMesEnCurso}Meses con datos bancarios: ${meses_disponibles.join(', ')}\nÚltimo mes bancario: ${ultimo_mes_con_datos?.label || ''}\n\n(Datos históricos disponibles pero fuera de ventana de 12 meses)`;
   } else {
-    encabezado = `${_infMesEnCurso}(Sin datos bancarios disponibles)`;
+    encabezado = `${_infMesEnCurso}(Sin datos disponibles todavía)`;
   }
 
   // ── Bloque FUENTE DE CIFRAS ───────────────────────────────────────────────
-  const bloqueFuente = `\n\n═════ INSTRUCCIÓN DE FUENTE ═════\n\nLos números del EERR mensual son tu única fuente de cifras. NUNCA inventes ni calcules cifras de cabeza. Si una cifra no está en este contexto, dile al cliente que la revise en su dashboard.\n\nREGLA DE EXCLUSIVIDAD — CÓMO HABLAR DE PORCENTAJES:\n\nAntes de citar el porcentaje de un mes, fíjate si ese mes tiene la marca ⚠️ ATENCIÓN en el RESUMEN POR MES. Son dos casos excluyentes: nunca los mezcles en el mismo mensaje.\n\nCASO 1 — El mes NO tiene marca ⚠️ (datos depurados): Cita el porcentaje y acláralo como aproximado con el matiz natural del ±5%, por ejemplo: "tu margen es aproximadamente XX%, y digo aproximado porque nos permitimos una diferencia de cerca del 5% hacia arriba o abajo, dado que es difícil tener siempre todos los movimientos categorizados". Dilo natural, como un CFO honesto sobre la precisión de sus números. No lo conviertas en muletilla.\n\nCASO 2 — El mes SÍ tiene marca ⚠️ (datos poco depurados): NO uses la frase del ±5%. Sería minimizar un problema real. En este caso el porcentaje es PRELIMINAR de verdad, no solo aproximado. La advertencia debe ser lo PRIMERO y lo principal que digas sobre ese porcentaje — no algo que agregas al final después de tranquilizar. Adviértele directo y con claridad: ese número puede moverse harto, conviene categorizar los movimientos pendientes antes de tomar decisiones con él.\n\nNunca apliques el matiz del ±5% y la advertencia de datos poco depurados al mismo mes. Es uno O el otro, según tenga o no la marca ⚠️.`;
+  const bloqueFuente = `\n\n═════ INSTRUCCIÓN DE FUENTE ═════\n\nLos números del EERR mensual son tu única fuente de cifras. NUNCA inventes ni calcules cifras de cabeza. Si una cifra no está en este contexto, dile al cliente que la revise en su dashboard.\n\nREGLA DE EXCLUSIVIDAD — CÓMO HABLAR DE PORCENTAJES:\n\nAntes de citar el porcentaje de un mes, fíjate si ese mes tiene la marca ⚠️ ATENCIÓN en el RESUMEN POR MES. Son dos casos excluyentes: nunca los mezcles en el mismo mensaje.\n\nCASO 1 — El mes NO tiene marca ⚠️ (datos depurados): Cita el porcentaje y acláralo como aproximado con el matiz natural del ±5%, por ejemplo: "tu margen es aproximadamente XX%, y digo aproximado porque nos permitimos una diferencia de cerca del 5% hacia arriba o abajo, dado que es difícil tener siempre todos los movimientos categorizados". Dilo natural, como un CFO honesto sobre la precisión de sus números. No lo conviertas en muletilla.\n\nCASO 2 — El mes SÍ tiene marca ⚠️ (datos poco depurados): NO uses la frase del ±5%. Sería minimizar un problema real. En este caso el porcentaje es PRELIMINAR de verdad, no solo aproximado. La advertencia debe ser lo PRIMERO y lo principal que digas sobre ese porcentaje — no algo que agregas al final después de tranquilizar. Adviértele directo y con claridad: ese número puede moverse harto, conviene categorizar los movimientos pendientes antes de tomar decisiones con él.\n\nNunca apliques el matiz del ±5% y la advertencia de datos poco depurados al mismo mes. Es uno O el otro, según tenga o no la marca ⚠️.\n\nREGLA DE MENÚ DE MESES:\n\nCuando el cliente pregunte por un mes que no tiene datos (como el mes en curso vacío) o haga una pregunta genérica sobre sus finanzas sin especificar mes (ej. '¿cómo van mis finanzas?', '¿cómo estoy?', '¿cuál es mi situación?'), NO entregues cifras de inmediato. Primero indícale la situación (si el mes en curso no tiene datos, dílo). Luego ofrécele un menú con los meses del campo 'Meses con información disponible', en orden, indicando para cada uno si son datos completos o datos manuales simples. Termina preguntándole cuál quiere revisar. NO entregues cifras de un mes específico hasta que el cliente lo elija.\n\nREGLA DATOS MANUALES — HONESTIDAD SOBRE LO QUE TIENES:\n\nSi el cliente elige un mes marcado '(DATOS MANUALES — solo resultado simple, SIN desglose de márgenes)' en el bloque DATOS HISTÓRICOS Y MANUALES, muéstrale lo que tienes (ingresos, egresos, resultado), pero con honestidad explícita: 'Para [mes] solo tengo el resultado simplificado — sin desglose de costos ni márgenes. Lo que sí puedo contarte es que...'. NUNCA inventes ni calcules márgenes (bruto, operacional, neto) ni costo directo para un mes manual: esos datos no existen. Si el cliente pregunta por un margen o desglose de un mes manual, díle con claridad que esa información no está disponible y suígele cargar el banco o registrar el EERR completo.`;
 
   // ── Bloque ESTADO DEL CLIENTE ─────────────────────────────────────────────
   const bloqueEstado = es_primera_sesion === true
@@ -1131,6 +1175,19 @@ function routingShortcut(mensaje, txnId, steps, nikoId, nikoList, accion) {
   // MODIFICAR reactivar
   if (/reactiva(r?)\s+|vuelve\s+a\s+poner\s+pendiente|desmarca(r?)\s+.{0,40}(como\s+)?hecho|lo\s+dej[eé]\s+pendiente\s+de\s+nuevo/i.test(msg)) {
     return { intent: 'modificar', accion: 'reactivar', confianza: 0.95, motivo: 'modificar_reactivar' };
+  }
+
+  // ELECCIÓN DE MES FINANCIERO — "abril", "muéstrame marzo", "quiero ver enero", etc.
+  // Blindado en 4 frentes: (1) sin TXN activo con pasos, (2) contiene nombre de mes,
+  // (3) no contiene "recordatorio", (4) no empieza con verbo de acción de recordatorio.
+  // Posición: después de todos los patrones de recordatorios, antes de conversacion genérico.
+  if (
+    !(txnId && Array.isArray(steps) && steps.length > 0) &&
+    /\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b/i.test(msg) &&
+    !/recordatorio/i.test(msg) &&
+    !/^\s*(cancela|borra|elimina|marca|completa|cambia|modifica|edita|mueve|actualiza|reactiva|desmarca|quita|saca|renombra)/i.test(msg)
+  ) {
+    return { intent: 'conversacion', accion: null, confianza: 0.9, motivo: 'eleccion_mes_financiero' };
   }
 
   // CONVERSACION — saludos, finanzas, preguntas generales
