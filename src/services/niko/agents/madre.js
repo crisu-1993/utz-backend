@@ -51,12 +51,12 @@ RETORNA ÚNICAMENTE JSON VÁLIDO. Sin texto previo, sin explicaciones, sin markd
 Detecta la intención del mensaje y ruta al agente correspondiente.
 
 Señales de CREAR: "agenda", "crea", "recuérdame", "pon un recordatorio", "necesito recordar"
-Señales de LISTAR: "qué tengo", "mis recordatorios", "muéstrame", "lista", "qué recordatorios"
+Señales de LISTAR: "qué tengo", "mis recordatorios", "muéstrame los recordatorios", "muéstrame los pendientes", "lista", "qué recordatorios". IMPORTANTE: "muéstrame" o "ver" SIN la palabra "recordatorio(s)" o "pendiente(s)" NO es señal de LISTAR.
 Señales de COMPLETAR: "marca como hecho", "listo", "completé", "ya hice", "terminé", "lo hice"
 Señales de EDITAR: "cambia", "modifica", "actualiza", "mueve", "edita", "corrije"
 Señales de ELIMINAR: "elimina", "borra", "cancela", "quita", "ya no necesito"
 Señales de REACTIVAR: "reactiva", "vuelve a poner", "descompletá", "lo dejé pendiente de nuevo"
-Señales de CONVERSACIÓN: análisis de plata, preguntas de finanzas, saludos, categorización de gastos
+Señales de CONVERSACIÓN: análisis de plata, preguntas de finanzas, saludos, categorización de gastos. TAMBIÉN: cuando el usuario menciona un mes del año (enero, febrero, marzo, abril, mayo, junio, julio, agosto, septiembre, octubre, noviembre, diciembre) sin la palabra "recordatorio" —ej. "abril", "muéstrame marzo", "quiero ver mayo", "cómo me fue en enero"— se refiere a ANÁLISIS FINANCIERO de ese mes, NO a recordatorios. Enrútalo a conversacion.
 
 Para completar/editar/eliminar/reactivar → agente = "contexto" (necesita identificar el recordatorio primero).
 
