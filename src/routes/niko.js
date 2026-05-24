@@ -604,7 +604,7 @@ router.delete('/recordatorios/:id', authMiddleware, async (req, res) => {
 
 router.post('/aviso', authMiddleware, async (req, res) => {
   const { empresa_id, user_id } = req.auth;
-  const { titulo, nota } = req.body || {};
+  const { titulo, nota, recordatorio_id: rawRecordatorioId } = req.body || {};
 
   // ── Validación ─────────────────────────────────────────────────────────────
   if (!titulo || typeof titulo !== 'string' || !titulo.trim()) {
@@ -613,6 +613,11 @@ router.post('/aviso', authMiddleware, async (req, res) => {
       error: 'El campo "titulo" es requerido y no puede estar vacío',
     });
   }
+
+  // recordatorio_id: opcional. Si viene mal formado, ignorarlo (null).
+  const recordatorio_id = (typeof rawRecordatorioId === 'string' && rawRecordatorioId.trim())
+    ? rawRecordatorioId.trim()
+    : null;
 
   try {
     // 1) Obtener nombre del representante para el saludo
@@ -645,14 +650,21 @@ router.post('/aviso', authMiddleware, async (req, res) => {
         mensaje,
         tipo:            'aviso',
         tools_invocadas: [],
+        recordatorio_id,
       });
 
     if (insertErr) {
+      // 23505 = unique_violation → el índice parcial idx_niko_conv_aviso_unico
+      // impidió un duplicado. No es error: ese recordatorio ya fue avisado.
+      if (insertErr.code === '23505') {
+        console.log('[aviso] Recordatorio ya avisado, omitido:', recordatorio_id);
+        return res.json({ ok: true, ya_existia: true });
+      }
       console.error('[aviso] Error insertando aviso:', insertErr.message);
       return res.status(500).json({ ok: false, error: 'Error al guardar el aviso' });
     }
 
-    return res.json({ ok: true, mensaje });
+    return res.json({ ok: true, mensaje, ya_existia: false });
 
   } catch (err) {
     console.error('[aviso] Error inesperado:', err.message);
