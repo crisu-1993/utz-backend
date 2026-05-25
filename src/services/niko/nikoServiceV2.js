@@ -794,6 +794,13 @@ ${topLines}${avisoSinCat}`;
   }
 
   // ── Bloque A: Patrones pendientes (score >= 70) ───────────────────────────
+  // Meses cortos en español para el desglose de patrones
+  const MESES_CORTO = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  const fmtMesCorto = (clave) => {
+    const [a, m] = clave.split('-');
+    return `${MESES_CORTO[parseInt(m, 10)] || clave} ${a}`;
+  };
+
   let bloquePatrones = '';
   const patronesFiltrados = (patrones_pendientes || []).filter(p => p.score >= 70);
 
@@ -807,9 +814,14 @@ ${topLines}${avisoSinCat}`;
 
       const ejemplos = (p.ejemplos_descripcion || []).slice(0, 2).join(', ');
 
+      const desglose = (p.desglose_meses || [])
+        .map(m => `${fmtMesCorto(m.mes)}: ${m.n} tx ($${fmt(m.monto)})`)
+        .join(' | ');
+
       return `${i + 1}. "${p.patron}" — score ${p.score}
    - ${p.veces_aparece} transacciones | $${fmt(p.monto_total)} acumulado
    - Tipo: ${tipo}
+   - Por mes: ${desglose || '(sin fecha)'}
    - Ejemplos: ${ejemplos}`;
     });
 
