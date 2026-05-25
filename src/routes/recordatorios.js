@@ -349,6 +349,17 @@ async function actualizarRecordatorio({ empresa_id, id, titulo, descripcion, fec
 
     if (error) throw new Error(error.message);
 
+    // Resetear el aviso: al modificar el recordatorio (editar/completar/reactivar), borrar su aviso previo
+    // de niko_conversaciones para que pueda volver a avisar cuando esté activo. Fire-and-forget.
+    supabase
+      .from('niko_conversaciones')
+      .delete()
+      .eq('recordatorio_id', id)
+      .eq('tipo', 'aviso')
+      .then(({ error: errAviso }) => {
+        if (errAviso) console.warn('[recordatorios] Error borrando aviso previo (actualizar):', errAviso.message);
+      });
+
     return { ok: true, recordatorio: data };
 
   } catch (err) {
@@ -392,6 +403,16 @@ async function eliminarRecordatorio({ empresa_id, id }) {
       .eq('empresa_id', empresa_id);
 
     if (error) throw new Error(error.message);
+
+    // Al eliminar el recordatorio, borrar también su aviso de niko_conversaciones. Fire-and-forget.
+    supabase
+      .from('niko_conversaciones')
+      .delete()
+      .eq('recordatorio_id', id)
+      .eq('tipo', 'aviso')
+      .then(({ error: errAviso }) => {
+        if (errAviso) console.warn('[recordatorios] Error borrando aviso previo (eliminar):', errAviso.message);
+      });
 
     return { ok: true, id };
 
