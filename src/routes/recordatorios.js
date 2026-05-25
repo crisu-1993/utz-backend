@@ -78,7 +78,7 @@ router.get('/', authMiddleware, async (req, res) => {
 //   origen            {string?} 'manual' (default) | 'niko_a_pedido'
 // @returns {object} { ok: true, recordatorio } | { ok: false, mensaje, status }
 
-async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fecha_vencimiento, hora_vencimiento, origen }) {
+async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fecha_vencimiento, hora_vencimiento, origen, clave_idempotencia = null }) {
   const origenFinal = origen ?? 'manual';
 
   if (!titulo || !String(titulo).trim()) {
@@ -93,8 +93,8 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
     return { ok: false, mensaje: 'fecha_vencimiento debe tener formato YYYY-MM-DD', status: 400 };
   }
 
-  if (!['manual', 'niko_a_pedido'].includes(origenFinal)) {
-    return { ok: false, mensaje: 'origen debe ser "manual" o "niko_a_pedido"', status: 400 };
+  if (!['manual', 'niko_a_pedido', 'tributario_auto'].includes(origenFinal)) {
+    return { ok: false, mensaje: 'origen debe ser "manual", "niko_a_pedido" o "tributario_auto"', status: 400 };
   }
 
   // Validar formato de hora_vencimiento (opcional)
@@ -141,11 +141,12 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
     const payload = {
       empresa_id,
       user_id,
-      titulo:            tituloLimpio,
-      descripcion:       descripcion ? String(descripcion).trim() : null,
-      fecha_vencimiento: fecha_vencimiento || null,
-      hora_vencimiento:  horaFinal,
-      origen:            origenFinal,
+      titulo:              tituloLimpio,
+      descripcion:         descripcion ? String(descripcion).trim() : null,
+      fecha_vencimiento:   fecha_vencimiento || null,
+      hora_vencimiento:    horaFinal,
+      origen:              origenFinal,
+      clave_idempotencia:  clave_idempotencia || null,
     };
 
     const { data, error } = await supabase
@@ -154,7 +155,14 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
       .select()
       .single();
 
-    if (error) throw new Error(error.message);
+    if (error) {
+      // Conflicto de clave única (clave_idempotencia duplicada) — idempotencia OK, no es error real
+      if (error.code === '23505') {
+        console.log(`[crearRecordatorio] Idempotente — ya existe (clave: ${clave_idempotencia || 'N/A'})`);
+        return { ok: true, idempotente: true, recordatorio: null };
+      }
+      throw new Error(error.message);
+    }
 
     return { ok: true, recordatorio: data };
 
