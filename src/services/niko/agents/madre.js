@@ -199,11 +199,17 @@ function construirInputRouting({
     .replace(/\{\{MENSAJE\}\}/g,         mensaje        || '')
     .replace(/\{\{FECHA_HOY\}\}/g,       hoy);
 
-  // Para routing, solo pasamos el último mensaje — sin historial largo.
-  // El historial solo se usa para extraer el estado del TXN (ya procesado por el router).
+  // Pasamos los ultimos mensajes del historial + el mensaje actual,
+  // para que la Madre tenga contexto al clasificar aclaraciones/seguimientos
+  // (ej. "me referia a X", "y el de mayo?", "ese mismo").
+  const historialReciente = (historial || []).slice(-4).map(m => ({
+    role: m.role,
+    content: m.content,
+  }));
   return {
     system,
     messages: [
+      ...historialReciente,
       { role: 'user', content: mensaje },
     ],
   };
