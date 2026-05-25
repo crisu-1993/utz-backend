@@ -129,7 +129,7 @@ function detectarPatrones(transacciones, { limit = Infinity, umbral = UMBRAL_MIN
         monto_total:       0,
         cantidad_ingresos: 0,
         cantidad_egresos:  0,
-        meses:             new Set(),
+        meses:             {},  // { "2026-01": { n: 0, monto: 0 }, ... }
         ejemplos:          [],
         ids:               [],
       };
@@ -142,7 +142,12 @@ function detectarPatrones(transacciones, { limit = Infinity, umbral = UMBRAL_MIN
     if (tx.tipo === 'ingreso') acum.cantidad_ingresos += 1;
     else                       acum.cantidad_egresos  += 1;
 
-    acum.meses.add((tx.fecha_transaccion || '').slice(0, 7));
+    const claveMes = (tx.fecha_transaccion || '').slice(0, 7);
+    if (claveMes) {
+      if (!acum.meses[claveMes]) acum.meses[claveMes] = { n: 0, monto: 0 };
+      acum.meses[claveMes].n     += 1;
+      acum.meses[claveMes].monto += Math.abs(tx.monto_original || 0);
+    }
     if (acum.ejemplos.length < 3) acum.ejemplos.push(tx.descripcion_normalizada);
     acum.ids.push(tx.id);
   }
@@ -154,7 +159,7 @@ function detectarPatrones(transacciones, { limit = Infinity, umbral = UMBRAL_MIN
         veces:            p.veces,
         montoPatron:      p.monto_total,
         montoTotalEmpresa,
-        mesesDistintos:   p.meses.size,
+        mesesDistintos:   Object.keys(p.meses).length,
       });
 
       const tipo_predominante = p.cantidad_ingresos >= p.cantidad_egresos
@@ -172,6 +177,9 @@ function detectarPatrones(transacciones, { limit = Infinity, umbral = UMBRAL_MIN
         score,
         ejemplos_descripcion: p.ejemplos,
         transacciones_ids:    p.ids,
+        desglose_meses:       Object.entries(p.meses)
+          .map(([mes, d]) => ({ mes, n: d.n, monto: d.monto }))
+          .sort((a, b) => a.mes.localeCompare(b.mes)),
       };
     })
     .filter(p => p.score >= scoreMin)
