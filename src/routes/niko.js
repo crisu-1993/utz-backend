@@ -604,7 +604,7 @@ router.delete('/recordatorios/:id', authMiddleware, async (req, res) => {
 
 router.post('/aviso', authMiddleware, async (req, res) => {
   const { empresa_id, user_id } = req.auth;
-  const { titulo, nota, recordatorio_id: rawRecordatorioId } = req.body || {};
+  const { titulo, nota, hora, recordatorio_id: rawRecordatorioId } = req.body || {};
 
   // ── Validación ─────────────────────────────────────────────────────────────
   if (!titulo || typeof titulo !== 'string' || !titulo.trim()) {
@@ -635,7 +635,11 @@ router.post('/aviso', authMiddleware, async (req, res) => {
 
     // 2) Componer el mensaje del aviso
     const tituloTrimmed = titulo.trim();
-    let mensaje = `${nombre}, me pediste recordarte: ${tituloTrimmed}.`;
+    // Si viene la hora (formato 'HH:MM:SS' o 'HH:MM'), agregar "para hoy a las HH:MM"
+    const horaTxt = (typeof hora === 'string' && hora.trim())
+      ? `, para hoy a las ${hora.trim().slice(0, 5)}`
+      : '';
+    let mensaje = `${nombre}, me pediste recordarte: ${tituloTrimmed}${horaTxt}.`;
     if (nota && typeof nota === 'string' && nota.trim()) {
       mensaje += ` (Nota: ${nota.trim()})`;
     }
