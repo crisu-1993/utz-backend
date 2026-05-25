@@ -672,6 +672,89 @@ router.post('/aviso', authMiddleware, async (req, res) => {
   }
 });
 
+// ─── GET /api/niko/avisos-pendientes/:empresa_id ────────────────────────────
+//
+// Devuelve los avisos (tipo='aviso') de esa empresa que aún no han sido
+// mostrados en la burbuja del chat (mostrado=false). El frontend lo consulta
+// al cargar para saber si debe abrir la burbuja (Capa 3).
+
+router.get('/avisos-pendientes/:empresa_id', authMiddleware, async (req, res) => {
+  const { user_id } = req.auth;
+  const empresa_id  = req.params.empresa_id;
+
+  try {
+    // Ownership check
+    const { data: empresa, error: empresaErr } = await supabase
+      .from('empresas')
+      .select('id')
+      .eq('id', empresa_id)
+      .eq('owner_id', user_id)
+      .maybeSingle();
+
+    if (empresaErr) {
+      console.error('[avisos-pendientes] Error validando empresa:', empresaErr.message);
+      return res.status(500).json({ ok: false, error: 'Error al validar empresa' });
+    }
+    if (!empresa) {
+      return res.status(403).json({ ok: false, error: 'Sin permisos sobre esa empresa' });
+    }
+
+    const { data, error } = await supabase
+      .from('niko_conversaciones')
+      .select('id, mensaje, recordatorio_id, created_at')
+      .eq('empresa_id', empresa_id)
+      .eq('tipo', 'aviso')
+      .eq('mostrado', false)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.error('[avisos-pendientes] Error consultando BD:', error.message);
+      return res.status(500).json({ ok: false, error: 'Error consultando avisos pendientes' });
+    }
+
+    return res.json({ ok: true, avisos: data });
+
+  } catch (err) {
+    console.error('[avisos-pendientes] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
+// ─── POST /api/niko/avisos/:id/marcar-mostrado ──────────────────────────────
+//
+// Marca UN aviso específico como mostrado=true. El frontend lo llama cuando
+// la burbuja ya mostró ese aviso, para no volver a abrirla por él (Capa 3).
+
+router.post('/avisos/:id/marcar-mostrado', authMiddleware, async (req, res) => {
+  const { empresa_id } = req.auth;
+  const aviso_id       = req.params.id;
+
+  try {
+    const { data, error } = await supabase
+      .from('niko_conversaciones')
+      .update({ mostrado: true })
+      .eq('id', aviso_id)
+      .eq('empresa_id', empresa_id)
+      .eq('tipo', 'aviso')
+      .select('id');
+
+    if (error) {
+      console.error('[marcar-mostrado] Error actualizando aviso:', error.message);
+      return res.status(500).json({ ok: false, error: 'Error al marcar aviso como mostrado' });
+    }
+
+    if (!data || data.length === 0) {
+      console.log('[marcar-mostrado] UPDATE sin efecto — id:', aviso_id, '| empresa_id:', empresa_id, '(no existe, no es aviso, o ya estaba mostrado)');
+    }
+
+    return res.json({ ok: true });
+
+  } catch (err) {
+    console.error('[marcar-mostrado] Error inesperado:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno del servidor' });
+  }
+});
+
 // ─── GET /api/niko/historial/:empresa_id ─────────────────────────────────────
 //
 // Devuelve el historial completo de conversación con Niko de una empresa.
