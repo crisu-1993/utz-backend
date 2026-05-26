@@ -76,21 +76,24 @@ function calcularFechaF22(anio) {
 function plantillaF29() {
   return {
     titulo: 'F29 (IVA) — plazos 12 y 20',
-    descripcion: 'Jefe, te recuerdo que hay hasta el 12 para el F29 si lo haces presencial en bancos, si lo haces onlines, hay más holgura, hasta el 20, te aviso desde ya para que trabajemos con tiempo.',
+    descripcion: 'Presencial en bancos hasta el 12. Online hasta el 20.',
+    mensaje_chat: 'Jefe, te recuerdo que hay hasta el 12 para el F29 si lo haces presencial en bancos; si lo haces online hay más holgura, hasta el 20. Te aviso desde ya para que trabajemos con tiempo.',
   };
 }
 
 function plantillaPrevired(mes) {
   return {
     titulo: 'Previred — cotizaciones',
-    descripcion: `Jefe, te aviso con tiempo: las cotizaciones (Previred) cierran el 13 de ${nombreMes(mes)}. Si no tienes trabajadores, puedes ignorar este recordatorio.`,
+    descripcion: 'Cierra el 13 del mes.',
+    mensaje_chat: `Jefe, te aviso con tiempo: las cotizaciones (Previred) cierran el 13 de ${nombreMes(mes)}. Si no tienes trabajadores, puedes ignorar este recordatorio.`,
   };
 }
 
 function plantillaF22() {
   return {
     titulo: 'Operación Renta (F22)',
-    descripcion: 'Jefe, arrancó la Operación Renta. El F22 se declara durante abril y suele cerrar a fin de mes. Confirma la fecha exacta en el SII y prepara tu declaración con tiempo.',
+    descripcion: 'Se declara durante abril. Confirma la fecha de cierre en el SII.',
+    mensaje_chat: 'Jefe, arrancó la Operación Renta. El F22 se declara durante abril y suele cerrar a fin de mes. Confirma la fecha exacta en el SII y prepara tu declaración con tiempo.',
   };
 }
 
@@ -123,6 +126,7 @@ async function generarParaEmpresa(empresa_id, user_id, hoyStr) {
       user_id,
       titulo:             texto.titulo,
       descripcion:        texto.descripcion,
+      mensaje_chat:       texto.mensaje_chat,
       fecha_vencimiento:  f29.fecha_aviso,
       hora_vencimiento:   '09:00:00',
       origen:             'tributario_auto',
@@ -148,6 +152,7 @@ async function generarParaEmpresa(empresa_id, user_id, hoyStr) {
       user_id,
       titulo:             texto.titulo,
       descripcion:        texto.descripcion,
+      mensaje_chat:       texto.mensaje_chat,
       fecha_vencimiento:  prev.fecha_aviso,
       hora_vencimiento:   '09:00:00',
       origen:             'tributario_auto',
@@ -174,6 +179,7 @@ async function generarParaEmpresa(empresa_id, user_id, hoyStr) {
         user_id,
         titulo:             texto.titulo,
         descripcion:        texto.descripcion,
+        mensaje_chat:       texto.mensaje_chat,
         fecha_vencimiento:  f22.fecha,
         hora_vencimiento:   '09:00:00',
         origen:             'tributario_auto',

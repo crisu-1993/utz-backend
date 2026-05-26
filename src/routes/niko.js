@@ -633,18 +633,41 @@ router.post('/aviso', authMiddleware, async (req, res) => {
 
     const nombre = empresa?.representante_nombre || 'Jefe';
 
-    // 2) Componer el mensaje del aviso
-    const tituloTrimmed = titulo.trim();
-    // Si viene la hora (formato 'HH:MM:SS' o 'HH:MM'), agregar "para hoy a las HH:MM"
-    const horaTxt = (typeof hora === 'string' && hora.trim())
-      ? `, para hoy a las ${hora.trim().slice(0, 5)}`
-      : '';
-    let mensaje = `${nombre}, me pediste recordarte: ${tituloTrimmed}${horaTxt}.`;
-    if (nota && typeof nota === 'string' && nota.trim()) {
-      mensaje += ` (Nota: ${nota.trim()})`;
+    // 2) Si hay recordatorio_id, intentar leer mensaje_chat de la BD
+    let mensajeChatDB = null;
+    if (recordatorio_id) {
+      try {
+        const { data: rec } = await supabase
+          .from('recordatorios')
+          .select('mensaje_chat')
+          .eq('id', recordatorio_id)
+          .maybeSingle();
+        if (rec?.mensaje_chat && rec.mensaje_chat.trim()) {
+          mensajeChatDB = rec.mensaje_chat.trim();
+        }
+      } catch (errChat) {
+        console.error('[aviso] Error leyendo mensaje_chat, usando template:', errChat.message);
+      }
     }
 
-    // 3) Insertar en niko_conversaciones como aviso
+    // 3) Componer el mensaje del aviso
+    let mensaje;
+    if (mensajeChatDB) {
+      // Recordatorio con mensaje_chat (ej. tributario) → usar tal cual
+      mensaje = mensajeChatDB;
+    } else {
+      // Template genérico (recordatorios del usuario)
+      const tituloTrimmed = titulo.trim();
+      const horaTxt = (typeof hora === 'string' && hora.trim())
+        ? `, para hoy a las ${hora.trim().slice(0, 5)}`
+        : '';
+      mensaje = `${nombre}, me pediste recordarte: ${tituloTrimmed}${horaTxt}.`;
+      if (nota && typeof nota === 'string' && nota.trim()) {
+        mensaje += ` (Nota: ${nota.trim()})`;
+      }
+    }
+
+    // 4) Insertar en niko_conversaciones como aviso
     const { error: insertErr } = await supabase
       .from('niko_conversaciones')
       .insert({

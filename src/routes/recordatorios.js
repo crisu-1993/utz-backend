@@ -78,7 +78,7 @@ router.get('/', authMiddleware, async (req, res) => {
 //   origen            {string?} 'manual' (default) | 'niko_a_pedido'
 // @returns {object} { ok: true, recordatorio } | { ok: false, mensaje, status }
 
-async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fecha_vencimiento, hora_vencimiento, origen, clave_idempotencia = null }) {
+async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fecha_vencimiento, hora_vencimiento, origen, clave_idempotencia = null, mensaje_chat = null }) {
   const origenFinal = origen ?? 'manual';
 
   if (!titulo || !String(titulo).trim()) {
@@ -147,6 +147,7 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
       hora_vencimiento:    horaFinal,
       origen:              origenFinal,
       clave_idempotencia:  clave_idempotencia || null,
+      mensaje_chat:        mensaje_chat ? String(mensaje_chat).trim() : null,
     };
 
     const { data, error } = await supabase
