@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { sincronizarTodasLasEmpresas } = require('./src/services/fintocService');
+const { generarRecordatoriosTributarios } = require('./src/services/recordatoriosTributarios');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -49,4 +51,29 @@ app.listen(PORT, () => {
   }, INTERVALO_MS);
 
   console.log(`[fintoc-cron] Polling de sincronización activo (cada ${INTERVALO_MS / 60000} min)`);
+
+  // Cron tributario: genera recordatorios de obligaciones (F29, Previred, F22) cada 12 horas.
+  // Corre una vez al arrancar (fire-and-forget) y luego cada 12h.
+  // Aislado: un error acá NUNCA debe tumbar el server ni afectar el cron de Fintoc.
+  const INTERVALO_TRIBUTARIO_MS = 12 * 60 * 60 * 1000; // 12 horas
+  const supabaseTributario = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+  );
+
+  // Corrida inmediata al arranque (fire-and-forget con .catch para no bloquear el boot)
+  generarRecordatoriosTributarios(supabaseTributario).catch((err) => {
+    console.error('[tributario-cron] Error en corrida inicial:', err.message);
+  });
+
+  // Cron cada 12h
+  setInterval(async () => {
+    try {
+      await generarRecordatoriosTributarios(supabaseTributario);
+    } catch (err) {
+      console.error('[tributario-cron] Error no capturado en cron:', err.message);
+    }
+  }, INTERVALO_TRIBUTARIO_MS);
+
+  console.log(`[tributario-cron] Cron tributario activo (cada ${INTERVALO_TRIBUTARIO_MS / 3600000} h)`);
 });
