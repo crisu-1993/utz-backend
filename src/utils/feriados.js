@@ -153,6 +153,59 @@ function siguienteMesFin({ año, mes }) {
   return { año: añoSig, mes: mesSig, dia: d.getDate() };
 }
 
+// ─── Días de la semana en español (0=domingo … 6=sábado) ────────────────────
+const DIAS_SEMANA = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+
+/**
+ * Nombre del día de la semana en español, en minúscula.
+ * Mismo patrón timezone-safe que esFinDeSemana.
+ * @param {string|Date} fecha  'YYYY-MM-DD' o Date
+ * @returns {string} 'lunes', 'martes', 'miércoles', etc.
+ */
+function nombreDiaSemana(fecha) {
+  const p = parsearFecha(fecha);
+  const dow = crearDateLocal(p).getDay(); // 0=dom, 6=sáb
+  return DIAS_SEMANA[dow];
+}
+
+/**
+ * Calcula la ventana lunes–domingo de la SEMANA SIGUIENTE a la de hoyStr.
+ * "Semana siguiente" = semana calendario (lun–dom) que viene después de la
+ * semana actual, sin importar en qué día de la semana estemos.
+ *
+ * Algoritmo:
+ *   1. dow = getDay() de hoy (0=dom … 6=sáb)
+ *   2. lunesEstaSemana = hoy − (dow===0 ? 6 : dow−1) días
+ *   3. lunesSiguiente  = lunesEstaSemana + 7
+ *   4. domingoSiguiente = lunesSiguiente + 6
+ *
+ * @param {string} hoyStr  'YYYY-MM-DD' (hoy en Chile)
+ * @returns {{ lunes: string, domingo: string }}
+ */
+function ventanaSemanaSiguiente(hoyStr) {
+  const p = parsearFecha(hoyStr);
+  const hoyDate = crearDateLocal(p);
+  const dow = hoyDate.getDay(); // 0=dom, 6=sáb
+
+  // Retroceder al lunes de esta semana
+  const diasHastaLunes = dow === 0 ? 6 : dow - 1;
+  const lunesEstaSemana = new Date(hoyDate);
+  lunesEstaSemana.setDate(hoyDate.getDate() - diasHastaLunes);
+
+  // Avanzar 7 días → lunes de la semana siguiente
+  const lunesSig = new Date(lunesEstaSemana);
+  lunesSig.setDate(lunesEstaSemana.getDate() + 7);
+
+  // +6 días → domingo de la semana siguiente
+  const domingoSig = new Date(lunesSig);
+  domingoSig.setDate(lunesSig.getDate() + 6);
+
+  return {
+    lunes:   formatearPartes({ año: lunesSig.getFullYear(),   mes: lunesSig.getMonth() + 1,   dia: lunesSig.getDate() }),
+    domingo: formatearPartes({ año: domingoSig.getFullYear(), mes: domingoSig.getMonth() + 1, dia: domingoSig.getDate() }),
+  };
+}
+
 /**
  * Retorna los feriados entre dos fechas (inclusive), útil para avisos de
  * "semana corta" o listados.
@@ -177,5 +230,7 @@ module.exports = {
   esFinDeSemana,
   esDiaInhabil,
   siguienteDiaHabil,
+  nombreDiaSemana,
+  ventanaSemanaSiguiente,
   feriadosEntre,
 };

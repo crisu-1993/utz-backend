@@ -93,8 +93,8 @@ async function crearRecordatorio({ empresa_id, user_id, titulo, descripcion, fec
     return { ok: false, mensaje: 'fecha_vencimiento debe tener formato YYYY-MM-DD', status: 400 };
   }
 
-  if (!['manual', 'niko_a_pedido', 'tributario_auto'].includes(origenFinal)) {
-    return { ok: false, mensaje: 'origen debe ser "manual", "niko_a_pedido" o "tributario_auto"', status: 400 };
+  if (!['manual', 'niko_a_pedido', 'tributario_auto', 'feriado_auto'].includes(origenFinal)) {
+    return { ok: false, mensaje: 'origen debe ser "manual", "niko_a_pedido", "tributario_auto" o "feriado_auto"', status: 400 };
   }
 
   // Validar formato de hora_vencimiento (opcional)

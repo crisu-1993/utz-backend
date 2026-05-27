@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { sincronizarTodasLasEmpresas } = require('./src/services/fintocService');
 const { generarRecordatoriosTributarios } = require('./src/services/recordatoriosTributarios');
+const { generarRecordatoriosFeriados } = require('./src/services/recordatoriosFeriados');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -76,4 +77,29 @@ app.listen(PORT, () => {
   }, INTERVALO_TRIBUTARIO_MS);
 
   console.log(`[tributario-cron] Cron tributario activo (cada ${INTERVALO_TRIBUTARIO_MS / 3600000} h)`);
+
+  // Cron feriados: avisa de feriados de la semana siguiente cada 24 horas.
+  // Corre una vez al arrancar (fire-and-forget) y luego cada 24h.
+  // Aislado: un error acá NUNCA debe tumbar el server ni afectar los otros crons.
+  const INTERVALO_FERIADOS_MS = 24 * 60 * 60 * 1000; // 24 horas
+  const supabaseFeriados = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+  );
+
+  // Corrida inmediata al arranque (fire-and-forget con .catch para no bloquear el boot)
+  generarRecordatoriosFeriados(supabaseFeriados).catch((err) => {
+    console.error('[feriados-cron] Error en corrida inicial:', err.message);
+  });
+
+  // Cron cada 24h
+  setInterval(async () => {
+    try {
+      await generarRecordatoriosFeriados(supabaseFeriados);
+    } catch (err) {
+      console.error('[feriados-cron] Error no capturado en cron:', err.message);
+    }
+  }, INTERVALO_FERIADOS_MS);
+
+  console.log(`[feriados-cron] Cron de feriados activo (cada ${INTERVALO_FERIADOS_MS / 3600000} h)`);
 });
