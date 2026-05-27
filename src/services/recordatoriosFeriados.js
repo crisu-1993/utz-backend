@@ -42,21 +42,30 @@ function clasificarFeriados(feriados) {
 }
 
 /**
- * Lista legible: "Año Nuevo que cae jueves" o
- * "Año Nuevo que cae jueves, y Reyes que cae viernes".
+ * Convierte 'YYYY-MM-DD' a 'DD/MM/YYYY' (formato chileno).
+ * Parsea por partes — timezone-safe, sin new Date(string).
+ */
+function formatearFechaCL(fechaStr) {
+  const [anio, mes, dia] = fechaStr.split('-');
+  return `${dia}/${mes}/${anio}`;
+}
+
+/**
+ * Lista legible: "Año Nuevo que cae jueves 01/01/2026" o
+ * "Año Nuevo que cae jueves 01/01/2026, y Reyes que cae viernes 06/01/2026".
  */
 function listaFeriados(arr) {
-  const items = arr.map(f => `${f.nombre} que cae ${f.dia}`);
+  const items = arr.map(f => `${f.nombre} que cae ${f.dia} ${formatearFechaCL(f.fecha)}`);
   if (items.length === 1) return items[0];
   return items.slice(0, -1).join(', ') + ', y ' + items[items.length - 1];
 }
 
 /**
- * Nota corta para descripción: "Año Nuevo (jueves)" o
- * "Año Nuevo (jueves), Reyes (viernes)".
+ * Nota corta para descripción: "Año Nuevo (jueves 01/01/2026)" o
+ * "Año Nuevo (jueves 01/01/2026), Reyes (viernes 06/01/2026)".
  */
 function notaFeriados(arr) {
-  return arr.map(f => `${f.nombre} (${f.dia})`).join(', ');
+  return arr.map(f => `${f.nombre} (${f.dia} ${formatearFechaCL(f.fecha)})`).join(', ');
 }
 
 /**
