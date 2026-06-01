@@ -9,6 +9,13 @@ const {
   variacionPct,
   consultarPeriodo,
 } = require('../utils/periodos');
+const {
+  evaluarDatosSuficientes,
+  leerCache,
+  guardarCache,
+  construirContextoMes,
+  generarInsightsIA,
+} = require('../services/insightsIA');
 
 function getSupabase() {
   return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -164,6 +171,30 @@ function recRecuperarEntradas(metricas, varEntradas) {
   };
 }
 
+// ─── Wrapper determinístico ──────────────────────────────────────────────────
+
+function generarDeterministico(metricas, comparacion) {
+  const varEntradas  = comparacion.disponible ? comparacion.var_entradas_pct  : null;
+  const varSalidas   = comparacion.disponible ? comparacion.var_salidas_pct   : null;
+  const varResultado = comparacion.disponible ? comparacion.var_resultado_pct : null;
+
+  const insights = [];
+  const i1 = insightResultado(metricas);
+  if (i1) insights.push(i1);
+  const i2 = insightPresion(metricas);
+  if (i2) insights.push(i2);
+  const i3 = insightEvolucion(varEntradas, varSalidas, varResultado);
+  if (i3) insights.push(i3);
+
+  const recomendaciones = [];
+  const r1 = recRevisarSalidas(metricas, varSalidas, varEntradas);
+  if (r1) recomendaciones.push(r1);
+  const r2 = recRecuperarEntradas(metricas, varEntradas);
+  if (r2) recomendaciones.push(r2);
+
+  return { insights, recomendaciones };
+}
+
 // ─── GET /api/insights/:empresa_id ───────────────────────────────────────────
 router.get('/:empresa_id', async (req, res) => {
   try {
@@ -190,7 +221,34 @@ router.get('/:empresa_id', async (req, res) => {
       fechaFin    = r.fecha_fin;
     }
 
-    // Período actual
+    // ── Detección de mes corriente (zona horaria Chile) ─────────────────────
+    const esMesConcreto = !!(mesNum && anioNum);
+    let esMesActual = false;
+    if (esMesConcreto) {
+      const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Santiago' }));
+      esMesActual = (mesNum === ahora.getMonth() + 1 && anioNum === ahora.getFullYear());
+    }
+
+    // ── Cache: solo para meses concretos no actuales ────────────────────────
+    if (esMesConcreto && !esMesActual) {
+      const cached = await leerCache(empresa_id, mesNum, anioNum, supabase);
+      if (cached) {
+        console.log(`[/insights] Cache HIT ${empresa_id} ${mesNum}/${anioNum}`);
+        return res.json({
+          ok: true,
+          fuente: 'cache',
+          data: {
+            periodo:        { inicio: fechaInicio, fin: fechaFin },
+            metricas:       cached.metricas,
+            comparacion:    cached.comparacion || { disponible: false },
+            insights:       cached.insights,
+            recomendaciones: cached.recomendaciones,
+          },
+        });
+      }
+    }
+
+    // ── Datos frescos (determinístico base + insumo para IA) ────────────────
     const txActual = await consultarPeriodo(supabase, empresa_id, fechaInicio, fechaFin);
     const { entradas, salidas } = sumarTotales(txActual);
     const resultado_neto = entradas - salidas;
@@ -234,30 +292,84 @@ router.get('/:empresa_id', async (req, res) => {
       console.error('[/insights] Error consultando período anterior:', errAnt.message);
     }
 
-    // Construir insights
-    const insights = [];
-    const i1 = insightResultado(metricas);
-    if (i1) insights.push(i1);
-    const i2 = insightPresion(metricas);
-    if (i2) insights.push(i2);
-    const i3 = insightEvolucion(varEntradas, varSalidas, varResultado);
-    if (i3) insights.push(i3);
+    // ── Flujo IA (solo para meses concretos no actuales) ────────────────────
+    if (esMesConcreto && !esMesActual) {
+      const evaluacion = await evaluarDatosSuficientes(empresa_id, mesNum, anioNum, supabase);
 
-    // Construir recomendaciones (solo las activadas)
-    const recomendaciones = [];
-    const r1 = recRevisarSalidas(metricas, varSalidas, varEntradas);
-    if (r1) recomendaciones.push(r1);
-    const r2 = recRecuperarEntradas(metricas, varEntradas);
-    if (r2) recomendaciones.push(r2);
+      if (evaluacion.suficientes) {
+        try {
+          const contexto = await construirContextoMes(empresa_id, mesNum, anioNum, supabase);
+          const resultadoIA = await generarInsightsIA({ empresa_id, mes: mesNum, anio: anioNum, contexto });
+
+          if (resultadoIA.ok) {
+            // Guardar en cache como 'ia'
+            await guardarCache({
+              empresa_id, mes: mesNum, anio: anioNum, tipo: 'ia',
+              insights: resultadoIA.insights,
+              recomendaciones: resultadoIA.recomendaciones,
+              metricas: resultadoIA.metricas || metricas,
+              comparacion: resultadoIA.comparacion || comparacion,
+              modelo_usado: resultadoIA.modelo_usado,
+              tokens_input: resultadoIA.tokens_input,
+              tokens_output: resultadoIA.tokens_output,
+              latencia_ms: resultadoIA.latencia_ms,
+            }, supabase);
+
+            return res.json({
+              ok: true,
+              fuente: 'ia',
+              data: {
+                periodo:        { inicio: fechaInicio, fin: fechaFin },
+                metricas:       resultadoIA.metricas || metricas,
+                comparacion:    resultadoIA.comparacion || comparacion,
+                insights:       resultadoIA.insights,
+                recomendaciones: resultadoIA.recomendaciones,
+              },
+            });
+          }
+
+          // IA falló → fallback determinístico
+          console.warn(`[/insights] IA falló (${resultadoIA.error}), fallback determinístico`);
+        } catch (errIA) {
+          console.error('[/insights] Error inesperado en flujo IA:', errIA.message);
+        }
+      }
+
+      // Datos insuficientes O IA falló → determinístico + cache
+      const det = generarDeterministico(metricas, comparacion);
+      await guardarCache({
+        empresa_id, mes: mesNum, anio: anioNum, tipo: 'deterministico',
+        insights: det.insights,
+        recomendaciones: det.recomendaciones,
+        metricas,
+        comparacion,
+      }, supabase);
+
+      return res.json({
+        ok: true,
+        fuente: 'deterministico',
+        data: {
+          periodo:        { inicio: fechaInicio, fin: fechaFin },
+          metricas,
+          comparacion,
+          insights:       det.insights,
+          recomendaciones: det.recomendaciones,
+        },
+      });
+    }
+
+    // ── Mes actual o rango libre → siempre determinístico fresco (sin cache)
+    const det = generarDeterministico(metricas, comparacion);
 
     return res.json({
       ok: true,
+      fuente: 'deterministico',
       data: {
         periodo:        { inicio: fechaInicio, fin: fechaFin },
         metricas,
         comparacion,
-        insights,
-        recomendaciones,
+        insights:       det.insights,
+        recomendaciones: det.recomendaciones,
       },
     });
   } catch (err) {
@@ -266,4 +378,4 @@ router.get('/:empresa_id', async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = Object.assign(router, { generarDeterministico });
