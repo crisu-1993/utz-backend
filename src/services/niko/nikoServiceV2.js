@@ -52,6 +52,12 @@ const PLANTILLAS_SATURACION = [
 
 const STATUS_SATURACION = new Set([529, 503, 502, 504]);
 
+// ─── Ventana deslizante ──────────────────────────────────────────────────────
+// Máximo de mensajes del historial que se envían a la API de Claude por turno.
+// La BD y el frontend guardan todo; este corte solo limita el contexto del LLM
+// para evitar saturación, reducir costo y latencia.
+const MAX_HISTORIAL_API = 15;
+
 function esErrorSaturacion(err) {
   return err && typeof err.status === 'number' && STATUS_SATURACION.has(err.status);
 }
@@ -1300,6 +1306,10 @@ async function chatWithNikoStreamV2({ mensaje, historial, empresa_id, user_id },
   const inicio   = Date.now();
   const supabase = getSupabase();
 
+  // Ventana deslizante: la BD/frontend guardan todo, pero a la API solo le
+  // mandamos los últimos N mensajes para evitar saturación de contexto.
+  const historialRecortado = (historial || []).slice(-MAX_HISTORIAL_API);
+
   // ─── ETAPA 0 — Cargar empresa_context + contexto financiero (una sola vez) ──
 
   const { data: empresa, error: empresaError } = await supabase
@@ -1335,10 +1345,10 @@ async function chatWithNikoStreamV2({ mensaje, historial, empresa_id, user_id },
 
   // ─── ETAPA 1 — Extraer estado del TXN del historial ──────────────────────────
 
-  let txnId      = markers.extraerTxnActivo(historial);
-  let steps      = txnId ? markers.extraerStepsDelTxn(historial, txnId)      : [];
-  let nikoId     = txnId ? markers.extraerNikoIdUltimo(historial, txnId)     : null;
-  let nikoList   = txnId ? markers.extraerNikoListUltimo(historial, txnId)   : null;
+  let txnId      = markers.extraerTxnActivo(historialRecortado);
+  let steps      = txnId ? markers.extraerStepsDelTxn(historialRecortado, txnId)      : [];
+  let nikoId     = txnId ? markers.extraerNikoIdUltimo(historialRecortado, txnId)     : null;
+  let nikoList   = txnId ? markers.extraerNikoListUltimo(historialRecortado, txnId)   : null;
   let accionPrev = extraerAccionDelTxn(steps);
   if (!txnId) txnId = markers.generarTxnId();
 
@@ -1353,7 +1363,7 @@ async function chatWithNikoStreamV2({ mensaje, historial, empresa_id, user_id },
   if (!routing || routing.confianza < 0.85) {
     console.log('[chatWithNikoStreamV2] Shortcut insuficiente. Llamando Madre LLM...');
     routing = await llamarMadreJSON({
-      mensaje, historial, txnId, steps, nikoId, nikoList, accion: accionPrev,
+      mensaje, historial: historialRecortado, txnId, steps, nikoId, nikoList, accion: accionPrev,
     });
   }
 
@@ -1370,19 +1380,19 @@ async function chatWithNikoStreamV2({ mensaje, historial, empresa_id, user_id },
 
     case 'crear':
       resultado = await dispatchCrear({
-        mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id,
+        mensaje, historial: historialRecortado, txnId, empresa_context, emit, empresa_id, user_id,
       });
       break;
 
     case 'listar':
       resultado = await dispatchListar({
-        mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id,
+        mensaje, historial: historialRecortado, txnId, empresa_context, emit, empresa_id, user_id,
       });
       break;
 
     case 'conversacion':
       resultado = await dispatchConv({
-        mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id,
+        mensaje, historial: historialRecortado, txnId, empresa_context, emit, empresa_id, user_id,
         ctxObj: ctxObjFinanciero,   // reutilizar el objeto ya cargado en ETAPA 0
       });
       break;
@@ -1390,7 +1400,7 @@ async function chatWithNikoStreamV2({ mensaje, historial, empresa_id, user_id },
     case 'modificar':
     case 'contexto':   // madre puede devolver 'contexto' para completar/editar/eliminar/reactivar → es fase 1 de modificar
       resultado = await flujoModificar({
-        mensaje, historial, txnId, steps, nikoId, nikoList,
+        mensaje, historial: historialRecortado, txnId, steps, nikoId, nikoList,
         accion:         routing.accion || accionPrev,
         empresa_context, empresa_id, user_id, emit,
       });
@@ -1399,7 +1409,7 @@ async function chatWithNikoStreamV2({ mensaje, historial, empresa_id, user_id },
     default:
       console.warn('[chatWithNikoStreamV2] Intent desconocido:', routing.intent, '→ fallback conversacion');
       resultado = await dispatchConv({
-        mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id,
+        mensaje, historial: historialRecortado, txnId, empresa_context, emit, empresa_id, user_id,
         ctxObj: ctxObjFinanciero,
       });
   }
