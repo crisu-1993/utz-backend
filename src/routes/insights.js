@@ -13,6 +13,7 @@ const {
   evaluarDatosSuficientes,
   leerCache,
   guardarCache,
+  borrarCache,
   construirContextoMes,
   generarInsightsIA,
 } = require('../services/insightsIA');
@@ -375,6 +376,36 @@ router.get('/:empresa_id', async (req, res) => {
   } catch (err) {
     console.error('[/insights] Error:', err);
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── DELETE /api/insights/:empresa_id/:mes/:anio ────────────────────────────
+router.delete('/:empresa_id/:mes/:anio', async (req, res) => {
+  try {
+    const supabase = getSupabase();
+    const empresa_id = req.params.empresa_id;
+    const mes = parseInt(req.params.mes, 10);
+    const anio = parseInt(req.params.anio, 10);
+
+    // Validaciones
+    if (!empresa_id || isNaN(mes) || isNaN(anio)) {
+      return res.status(400).json({ ok: false, error: 'parámetros inválidos' });
+    }
+    if (mes < 1 || mes > 12) {
+      return res.status(400).json({ ok: false, error: 'mes debe estar entre 1 y 12' });
+    }
+    if (anio < 2020 || anio > 2100) {
+      return res.status(400).json({ ok: false, error: 'anio fuera de rango' });
+    }
+
+    const resultado = await borrarCache(empresa_id, mes, anio, supabase);
+
+    console.log(`[/insights DELETE] empresa=${empresa_id} mes=${mes}/${anio} ok=${resultado.ok}`);
+
+    return res.json({ ok: true, borrado: resultado.ok });
+  } catch (err) {
+    console.error('[/insights DELETE] Error:', err.message);
+    return res.status(500).json({ ok: false, error: 'Error interno' });
   }
 });
 
