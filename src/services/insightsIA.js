@@ -17,8 +17,10 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { createClient } = require('@supabase/supabase-js');
 const { obtenerContextoFinanciero } = require('./niko/contextoFinanciero');
 const { calcularRangoMes, consultarPeriodo, variacionPct } = require('../utils/periodos');
+const { generarDeterministico } = require('./insightsDeterministico');
 
 const MODEL = 'claude-sonnet-4-6';
 
@@ -564,6 +566,103 @@ function _serializarContexto(contexto) {
   return lines.join('\n');
 }
 
+// ─── 7. obtenerInsightsParaNiko ───────────────────────────────────────────────
+
+/**
+ * Obtiene insights y recomendaciones para un mes dado, optimizado para consumo
+ * interno de Niko (sin guardar en cache, sin llamar IA).
+ *
+ * Lógica:
+ *   - Mes actual  → determinístico fresco (nunca cachea)
+ *   - Mes cerrado → lee cache; si MISS → determinístico fresco
+ *
+ * NUNCA llama generarInsightsIA ni guardarCache.
+ *
+ * @param {string} empresa_id
+ * @param {number} mes  - 1-12
+ * @param {number} anio - YYYY
+ * @returns {Promise<{ insights: Array, recomendaciones: Array, fuente: string }>}
+ *   fuente: 'cache' | 'deterministico_actual' | 'deterministico_fresh' | 'error'
+ *   Nunca lanza excepción — en error devuelve arrays vacíos para no romper el
+ *   contexto de Niko.
+ */
+async function obtenerInsightsParaNiko(empresa_id, mes, anio) {
+  try {
+    // ── Detectar mes actual (zona horaria Chile, idéntico a insights.js:229) ─
+    const ahora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Santiago' }));
+    const esMesActual = (mes === ahora.getMonth() + 1 && anio === ahora.getFullYear());
+
+    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+
+    // ── Mes cerrado: intentar cache ───────────────────────────────────────────
+    if (!esMesActual) {
+      const cached = await leerCache(empresa_id, mes, anio, supabase);
+      if (cached) {
+        return {
+          insights:        cached.insights        || [],
+          recomendaciones: cached.recomendaciones || [],
+          fuente: 'cache',
+        };
+      }
+    }
+
+    // ── Calcular métricas del mes (mismo cálculo que insights.js:253-259) ────
+    const rango    = calcularRangoMes(anio, mes);
+    const txActual = await consultarPeriodo(supabase, empresa_id, rango.fecha_inicio, rango.fecha_fin);
+
+    let entradas = 0, salidas = 0;
+    for (const tx of txActual) {
+      const monto = Number(tx.monto_original) || 0;
+      if (tx.tipo === 'ingreso') entradas += monto;
+      else if (tx.tipo === 'egreso') salidas += monto;
+    }
+    const resultado_neto = entradas - salidas;
+    const margen_caja    = entradas > 0 ? (resultado_neto / entradas) * 100 : 0;
+    const razon_salidas  = entradas > 0 ? (salidas / entradas) * 100 : 0;
+    const metricas = { entradas, salidas, resultado_neto, margen_caja, razon_salidas };
+
+    // ── Calcular comparación con mes anterior (mismo cálculo que insights.js:265-294)
+    let comparacion = { disponible: false };
+    try {
+      const mesAnt  = mes === 1 ? 12 : mes - 1;
+      const anioAnt = mes === 1 ? anio - 1 : anio;
+      const rangoAnt = calcularRangoMes(anioAnt, mesAnt);
+      const txAnt    = await consultarPeriodo(supabase, empresa_id, rangoAnt.fecha_inicio, rangoAnt.fecha_fin);
+
+      let entradasAnt = 0, salidasAnt = 0;
+      for (const tx of txAnt) {
+        const monto = Number(tx.monto_original) || 0;
+        if (tx.tipo === 'ingreso') entradasAnt += monto;
+        else if (tx.tipo === 'egreso') salidasAnt += monto;
+      }
+      const resultadoAnt = entradasAnt - salidasAnt;
+
+      if (entradasAnt > 0 || salidasAnt > 0) {
+        comparacion = {
+          disponible:        true,
+          var_entradas_pct:  variacionPct(entradas,       entradasAnt),
+          var_salidas_pct:   variacionPct(salidas,        salidasAnt),
+          var_resultado_pct: variacionPct(resultado_neto, resultadoAnt),
+        };
+      }
+    } catch (errAnt) {
+      console.error('[obtenerInsightsParaNiko] Error período anterior:', errAnt.message);
+    }
+
+    // ── Generar determinístico ────────────────────────────────────────────────
+    const det = generarDeterministico(metricas, comparacion);
+
+    return {
+      insights:        det.insights,
+      recomendaciones: det.recomendaciones,
+      fuente: esMesActual ? 'deterministico_actual' : 'deterministico_fresh',
+    };
+  } catch (err) {
+    console.error('[obtenerInsightsParaNiko] Error:', err.message);
+    return { insights: [], recomendaciones: [], fuente: 'error' };
+  }
+}
+
 // ─── Exports ─────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -574,4 +673,5 @@ module.exports = {
   borrarCache,
   construirContextoMes,
   generarInsightsIA,
+  obtenerInsightsParaNiko,
 };
