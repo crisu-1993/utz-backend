@@ -715,6 +715,7 @@ function formatearContexto(contexto) {
     patrones_pendientes,
     reglas_activas,
     es_primera_sesion,
+    insights_ultimo_mes,
   } = contexto;
 
   const fmt = n => Math.round(n).toLocaleString('es-CL');
@@ -905,6 +906,32 @@ ${topLines}${avisoSinCat}`;
     encabezado = `${_infMesEnCurso}(Sin datos disponibles todavía)`;
   }
 
+  // ── Bloque OBSERVACIONES DEL PANEL (insights del dashboard para Niko) ──────
+  let bloqueInsights = '';
+  const _ins = insights_ultimo_mes || {};
+  const _tieneInsights = Array.isArray(_ins.insights)        && _ins.insights.length > 0;
+  const _tieneRecos    = Array.isArray(_ins.recomendaciones) && _ins.recomendaciones.length > 0;
+
+  if ((_tieneInsights || _tieneRecos) && _ins.fuente !== 'sin_datos' && _ins.fuente !== 'error') {
+    const lineas = [];
+
+    if (_tieneInsights) {
+      lineas.push('OBSERVACIONES:');
+      lineas.push(..._ins.insights.map(i => `• [${i.tono}] ${i.titulo} — ${i.texto}`));
+    }
+
+    if (_tieneRecos) {
+      if (_tieneInsights) lineas.push('');
+      lineas.push('RECOMENDACIONES DEL PANEL:');
+      lineas.push(..._ins.recomendaciones.map(r => `• [${r.tono}] ${r.titulo} — ${r.texto}`));
+    }
+
+    bloqueInsights = `\n\n═══ OBSERVACIONES DEL PANEL — ${_ins.label} ═══\n` +
+      `Estas son las observaciones y recomendaciones que el cliente VE en su dashboard\n` +
+      `para este período. Son tu fuente de verdad, compartida con el panel.\n\n` +
+      lineas.join('\n');
+  }
+
   // ── Bloque FUENTE DE CIFRAS ───────────────────────────────────────────────
   const bloqueFuente = `\n\n═════ INSTRUCCIÓN DE FUENTE ═════\n\nLos números del EERR mensual son tu única fuente de cifras. NUNCA inventes ni calcules cifras de cabeza. Si una cifra no está en este contexto, dile al cliente que la revise en su dashboard.\n\nREGLA DE EXCLUSIVIDAD — CÓMO HABLAR DE PORCENTAJES:\n\nAntes de citar el porcentaje de un mes, fíjate si ese mes tiene la marca ⚠️ ATENCIÓN en el RESUMEN POR MES. Son dos casos excluyentes: nunca los mezcles en el mismo mensaje.\n\nCASO 1 — El mes NO tiene marca ⚠️ (datos depurados): Cita el porcentaje y acláralo como aproximado con el matiz natural del ±5%, por ejemplo: "tu margen es aproximadamente XX%, y digo aproximado porque nos permitimos una diferencia de cerca del 5% hacia arriba o abajo, dado que es difícil tener siempre todos los movimientos categorizados". Dilo natural, como un CFO honesto sobre la precisión de sus números. No lo conviertas en muletilla.\n\nCASO 2 — El mes SÍ tiene marca ⚠️ (datos poco depurados): NO uses la frase del ±5%. Sería minimizar un problema real. En este caso el porcentaje es PRELIMINAR de verdad, no solo aproximado. La advertencia debe ser lo PRIMERO y lo principal que digas sobre ese porcentaje — no algo que agregas al final después de tranquilizar. Adviértele directo y con claridad: ese número puede moverse harto, conviene categorizar los movimientos pendientes antes de tomar decisiones con él.\n\nNunca apliques el matiz del ±5% y la advertencia de datos poco depurados al mismo mes. Es uno O el otro, según tenga o no la marca ⚠️.\n\nREGLA DE MENÚ DE MESES:\n\nCuando el cliente pregunte por un mes que no tiene datos (como el mes en curso vacío) o haga una pregunta genérica sobre sus finanzas sin especificar mes (ej. '¿cómo van mis finanzas?', '¿cómo estoy?', '¿cuál es mi situación?'), NO entregues cifras de inmediato. Primero indícale la situación (si el mes en curso no tiene datos, dílo). Luego ofrécele un menú con los meses del campo 'Meses con información disponible', en orden, indicando para cada uno si son datos completos o datos manuales simples. Termina preguntándole cuál quiere revisar. NO entregues cifras de un mes específico hasta que el cliente lo elija.\n\nREGLA DATOS MANUALES — HONESTIDAD SOBRE LO QUE TIENES:\n\nSi el cliente elige un mes marcado '(DATOS MANUALES — solo resultado simple, SIN desglose de márgenes)' en el bloque DATOS HISTÓRICOS Y MANUALES, muéstrale lo que tienes (ingresos, egresos, resultado), pero con honestidad explícita: 'Para [mes] solo tengo el resultado simplificado — sin desglose de costos ni márgenes. Lo que sí puedo contarte es que...'. NUNCA inventes ni calcules márgenes (bruto, operacional, neto) ni costo directo para un mes manual: esos datos no existen. Si el cliente pregunta por un margen o desglose de un mes manual, díle con claridad que esa información no está disponible y suígele cargar el banco o registrar el EERR completo.`;
 
@@ -913,7 +940,7 @@ ${topLines}${avisoSinCat}`;
     ? `\n\n═════ ESTADO DEL CLIENTE ═════\n\nes_primera_sesion: true\n→ Usa la presentación formal completa en este mensaje.`
     : `\n\n═════ ESTADO DEL CLIENTE ═════\n\nes_primera_sesion: false\n→ Cliente recurrente. Saluda de forma casual, sin presentarte.`;
 
-  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloquePatrones}${bloqueReglas}${bloqueFuente}${bloqueEstado}`;
+  return `DATOS FINANCIEROS DISPONIBLES\n\n${encabezado}${bloqueManual}${bloqueInsights}${bloquePatrones}${bloqueReglas}${bloqueFuente}${bloqueEstado}`;
 }
 
 async function dispatchConv({ mensaje, historial, txnId, empresa_context, emit, empresa_id, user_id, ctxObj = null }) {
