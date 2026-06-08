@@ -265,6 +265,7 @@ async function obtenerContextoFinanciero(empresa_id) {
       patrones_pendientes,
       reglas_activas,
       es_primera_sesion,
+      insights_ultimo_mes:  { insights: [], recomendaciones: [], fuente: 'sin_datos' },
     };
   }
 
@@ -303,6 +304,25 @@ async function obtenerContextoFinanciero(empresa_id) {
   // ── EERR mensual con lógica contable de eerrCalculator (PASO 6) ───────────
   const eerr_mensual = construirEerrMensual(transacciones, categoriasEerr);
 
+  // ── Insights del último mes con datos (para Niko) ─────────────────────────
+  let insights_ultimo_mes = { insights: [], recomendaciones: [], fuente: 'sin_datos' };
+  if (ultimo_mes_con_datos) {
+    try {
+      const { obtenerInsightsParaNiko } = require('../insightsIA'); // lazy — evita circular dep en carga
+      const r = await obtenerInsightsParaNiko(empresa_id, ultimo_mes_con_datos.mes, ultimo_mes_con_datos.año);
+      insights_ultimo_mes = {
+        insights:        r.insights,
+        recomendaciones: r.recomendaciones,
+        fuente:          r.fuente,
+        mes:             ultimo_mes_con_datos.mes,
+        anio:            ultimo_mes_con_datos.año,
+        label:           ultimo_mes_con_datos.label,
+      };
+    } catch (e) {
+      console.error('[contextoFinanciero] insights:', e.message);
+    }
+  }
+
   return {
     meses_disponibles,
     ultimo_mes_con_datos,
@@ -312,6 +332,7 @@ async function obtenerContextoFinanciero(empresa_id) {
     patrones_pendientes,
     reglas_activas,
     es_primera_sesion,
+    insights_ultimo_mes,
   };
 }
 
