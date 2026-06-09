@@ -12,15 +12,16 @@ function getSupabase() {
 
 // ─── Tabla de scoring ─────────────────────────────────────────────────────────
 //
-//  Indicador       | >umbral_alto → 20pts | entre → 10pts  | <umbral_bajo → 0pts
-//  liquidez        | >1.5               | 1–1.5          | <1
-//  margen          | >20%               | 10–20%         | <10%
-//  dias_caja       | >30                | 15–30          | <15
-//  endeudamiento   | <30%               | 30–60%         | >60%
+//  Indicador       | >umbral_alto → 20pts | entre → 10pts  | <umbral_bajo → 0pts  | peso
+//  liquidez        | >1.5               | 1–1.5          | <1                   |  x1
+//  margen          | >20%               | 10–20%         | <10%                 |  x1
+//  dias_caja       | >30                | 15–30          | <15                  |  x1
+//  endeudamiento   | <30%               | 30–60%         | >60%                 |  x1
+//  control         | ≥80%               | ≥40%           | <40%                 |  x2
 //
 //  días_cobro: excluido del score (no medible con datos de cartola bancaria).
 //  Indicadores sin datos suficientes se marcan N/A y no puntúan.
-//  Score normalizado = Math.round(puntosObtenidos / (20 * nDisponibles) * 100).
+//  Score normalizado = Math.round(puntosObtenidos_ponderados / pesoPosible_ponderado * 100).
 
 function puntosLiquidez(v) {
   if (v > 1.5) return 20;
@@ -52,6 +53,12 @@ function puntosEndeudamiento(v) {
   return 0;
 }
 
+function puntosControl(pct) {
+  if (pct >= 80) return 20;
+  if (pct >= 40) return 10;
+  return 0;
+}
+
 // ─── Texto de estado según score ──────────────────────────────────────────────
 function estadoScore(score) {
   if (score >= 80) return { estado: 'Excelente',          color: 'green'  };
@@ -66,46 +73,73 @@ async function calcularMetricas(supabase, empresa_id, año, mes) {
   const ultimoDia = new Date(año, mes, 0).getDate();
   const hasta = `${año}-${String(mes).padStart(2, '0')}-${ultimoDia}`;
 
-  // Transacciones del mes
-  const { data: txMes, error: errMes } = await supabase
-    .from('transacciones_historicas')
-    .select('tipo, monto_original, categoria_sugerida_ia, estado, fecha_transaccion')
-    .eq('empresa_id', empresa_id)
-    .gte('fecha_transaccion', desde)
-    .lte('fecha_transaccion', hasta);
+  // Las tres queries en paralelo
+  const [
+    { data: txMes,       error: errMes  },
+    { data: txHistorico, error: errHist },
+    { data: cats,        error: errCats },
+  ] = await Promise.all([
+    // Transacciones del mes
+    supabase
+      .from('transacciones_historicas')
+      .select('tipo, monto_original, categoria_sugerida_ia, estado, fecha_transaccion, categoria_id')
+      .eq('empresa_id', empresa_id)
+      .gte('fecha_transaccion', desde)
+      .lte('fecha_transaccion', hasta),
+    // Todas las transacciones históricas hasta el fin del mes (para saldo acumulado)
+    supabase
+      .from('transacciones_historicas')
+      .select('tipo, monto_original')
+      .eq('empresa_id', empresa_id)
+      .lte('fecha_transaccion', hasta),
+    // Categorías para mapear categoria_id → seccion_eerr
+    supabase
+      .from('categorias_eerr')
+      .select('id, seccion_eerr')
+      .eq('empresa_id', empresa_id)
+      .eq('activa', true),
+  ]);
 
-  if (errMes) throw new Error(errMes.message);
-
-  // Todas las transacciones históricas hasta el fin del mes (para saldo acumulado)
-  const { data: txHistorico, error: errHist } = await supabase
-    .from('transacciones_historicas')
-    .select('tipo, monto_original')
-    .eq('empresa_id', empresa_id)
-    .lte('fecha_transaccion', hasta);
-
+  if (errMes)  throw new Error(errMes.message);
   if (errHist) throw new Error(errHist.message);
+  if (errCats) throw new Error(errCats.message);
 
-  const txMesArr   = txMes      || [];
-  const txHistArr  = txHistorico || [];
+  const txMesArr  = txMes      || [];
+  const txHistArr = txHistorico || [];
+
+  // Mapa categoria_id → seccion_eerr
+  const mapaSeccion = {};
+  for (const cat of (cats || [])) {
+    mapaSeccion[cat.id] = cat.seccion_eerr;
+  }
 
   // ── Totales del mes ───────────────────────────────────────────────────────
-  let ingresosMes = 0;
-  let egresosMes  = 0;
-  let gastosFinancMes = 0;
-  let ingresosPendientes = 0;
+  let ingresosMes           = 0;
+  let egresosMes            = 0;
+  let gastosFinancMes       = 0;
+  let ingresosPendientes    = 0;
+  let egresosConCategoriaId = 0;
+  let txConCategoriaId      = 0;
 
   for (const t of txMesArr) {
     const monto = Number(t.monto_original);
+    if (t.categoria_id != null) txConCategoriaId++;
     if (t.tipo === 'ingreso') {
       ingresosMes += monto;
       if (t.estado === 'pendiente_revision') ingresosPendientes += monto;
     } else {
       egresosMes += monto;
-      if (t.categoria_sugerida_ia === 'gastos_financieros') {
-        gastosFinancMes += monto;
+      if (t.categoria_id != null) {
+        egresosConCategoriaId++;
+        if (mapaSeccion[t.categoria_id] === 'gasto_financiero') {
+          gastosFinancMes += monto;
+        }
       }
     }
   }
+
+  const totalTx         = txMesArr.length;
+  const pctCategorizado = totalTx > 0 ? Math.round((txConCategoriaId / totalTx) * 100) : 0;
 
   // ── Saldo acumulado histórico ─────────────────────────────────────────────
   let saldoHistorico = 0;
@@ -139,64 +173,61 @@ async function calcularMetricas(supabase, empresa_id, año, mes) {
     ? Math.round((ingresosPendientes / ingresosMes) * 30)
     : 0;
 
-  // 5. Endeudamiento: gastos financieros / ingresos * 100
+  // 5. Endeudamiento: gastos financieros (categoria_id → gasto_financiero) / ingresos * 100
   const endeudamiento = ingresosMes > 0
     ? Math.round((gastosFinancMes / ingresosMes) * 10000) / 100
     : 0;
 
-  // ── Señales de disponibilidad ─────────────────────────────────────────────
-  // Distinguen "sin datos" de "valor legítimamente bajo/cero".
-  // Se derivan de los datos ya leídos, sin queries adicionales.
-  const egresosCategorizados = txMesArr.filter(
-    t => t.tipo !== 'ingreso' &&
-         t.categoria_sugerida_ia != null &&
-         t.categoria_sugerida_ia !== ''
-  ).length;
-
   return {
-    liquidez:      Math.round(liquidez * 100) / 100,
-    margen:        Math.round(margen * 100) / 100,
-    dias_caja:     Math.min(diasCaja, 999),
-    dias_cobro:    diasCobro,
-    endeudamiento: Math.round(endeudamiento * 100) / 100,
+    liquidez:         Math.round(liquidez * 100) / 100,
+    margen:           Math.round(margen * 100) / 100,
+    dias_caja:        Math.min(diasCaja, 999),
+    dias_cobro:       diasCobro,
+    endeudamiento:    Math.round(endeudamiento * 100) / 100,
+    pct_categorizado: pctCategorizado,
     // Disponibilidad por indicador
     disp_liquidez:      ingresosMes > 0 || egresosMes > 0,
     disp_margen:        ingresosMes > 0,
     disp_dias_caja:     txHistArr.length > 0,
-    disp_endeudamiento: egresosCategorizados > 0,
+    disp_endeudamiento: egresosConCategoriaId > 0,
+    disp_control:       totalTx > 0,
   };
 }
 
 // ─── Score normalizado sobre indicadores disponibles ─────────────────────────
 function calcularScoreNormalizado(metricas) {
-  const dispLiquidez      = metricas.disp_liquidez;
-  const dispMargen        = metricas.disp_margen;
-  const dispDiasCaja      = metricas.disp_dias_caja;
-  const dispEndeudamiento = metricas.disp_endeudamiento;
+  const ptLiquidez      = metricas.disp_liquidez      ? puntosLiquidez(metricas.liquidez)           : 0;
+  const ptMargen        = metricas.disp_margen        ? puntosMargen(metricas.margen)               : 0;
+  const ptDiasCaja      = metricas.disp_dias_caja     ? puntosDiasCaja(metricas.dias_caja)           : 0;
+  const ptEndeudamiento = metricas.disp_endeudamiento ? puntosEndeudamiento(metricas.endeudamiento) : 0;
+  const ptControl       = metricas.disp_control       ? puntosControl(metricas.pct_categorizado)     : 0;
 
-  const ptLiquidez      = dispLiquidez      ? puntosLiquidez(metricas.liquidez)           : 0;
-  const ptMargen        = dispMargen        ? puntosMargen(metricas.margen)               : 0;
-  const ptDiasCaja      = dispDiasCaja      ? puntosDiasCaja(metricas.dias_caja)           : 0;
-  const ptEndeudamiento = dispEndeudamiento ? puntosEndeudamiento(metricas.endeudamiento) : 0;
-
-  const puntosObtenidos = ptLiquidez + ptMargen + ptDiasCaja + ptEndeudamiento;
-  const nDisponibles    = [dispLiquidez, dispMargen, dispDiasCaja, dispEndeudamiento].filter(Boolean).length;
-  const puntosPosibles  = 20 * nDisponibles;
-  const score           = puntosPosibles > 0
-    ? Math.round((puntosObtenidos / puntosPosibles) * 100)
-    : null;
+  const indicadores = [
+    { disp: metricas.disp_liquidez,      pts: ptLiquidez,      peso: 1 },
+    { disp: metricas.disp_margen,        pts: ptMargen,        peso: 1 },
+    { disp: metricas.disp_dias_caja,     pts: ptDiasCaja,      peso: 1 },
+    { disp: metricas.disp_endeudamiento, pts: ptEndeudamiento, peso: 1 },
+    { disp: metricas.disp_control,       pts: ptControl,       peso: 2 },
+  ];
+  const disponibles     = indicadores.filter(i => i.disp);
+  const puntosObtenidos = disponibles.reduce((s, i) => s + i.pts * i.peso, 0);
+  const pesoPosible     = disponibles.reduce((s, i) => s + 20 * i.peso, 0);
+  const score           = pesoPosible > 0 ? Math.round((puntosObtenidos / pesoPosible) * 100) : null;
+  const nDisponibles    = disponibles.length;
 
   return {
     ptLiquidez,
     ptMargen,
     ptDiasCaja,
     ptEndeudamiento,
+    ptControl,
     nDisponibles,
     score,
-    dispLiquidez,
-    dispMargen,
-    dispDiasCaja,
-    dispEndeudamiento,
+    dispLiquidez:      metricas.disp_liquidez,
+    dispMargen:        metricas.disp_margen,
+    dispDiasCaja:      metricas.disp_dias_caja,
+    dispEndeudamiento: metricas.disp_endeudamiento,
+    dispControl:       metricas.disp_control,
   };
 }
 
@@ -239,9 +270,9 @@ router.get('/:empresa_id', async (req, res) => {
 
     // ── Score normalizado ─────────────────────────────────────────────────────
     const {
-      ptLiquidez, ptMargen, ptDiasCaja, ptEndeudamiento,
+      ptLiquidez, ptMargen, ptDiasCaja, ptEndeudamiento, ptControl,
       nDisponibles, score,
-      dispLiquidez, dispMargen, dispDiasCaja, dispEndeudamiento,
+      dispLiquidez, dispMargen, dispDiasCaja, dispEndeudamiento, dispControl,
     } = calcularScoreNormalizado(metricas);
 
     const { score: scoreAnt } = calcularScoreNormalizado(metricasAnt);
@@ -260,13 +291,14 @@ router.get('/:empresa_id', async (req, res) => {
       estado,
       color,
       indicadores_disponibles: nDisponibles,
-      indicadores_totales: 4,
+      indicadores_totales: 5,
       detalle: {
-        liquidez:      { valor: metricas.liquidez,      puntos: ptLiquidez,      disponible: dispLiquidez      },
-        margen:        { valor: metricas.margen,        puntos: ptMargen,        disponible: dispMargen        },
-        dias_caja:     { valor: metricas.dias_caja,     puntos: ptDiasCaja,      disponible: dispDiasCaja      },
-        endeudamiento: { valor: metricas.endeudamiento, puntos: ptEndeudamiento, disponible: dispEndeudamiento },
-        dias_cobro:    { valor: metricas.dias_cobro,    puntos: 0,               disponible: false             },
+        liquidez:      { valor: metricas.liquidez,          puntos: ptLiquidez,      disponible: dispLiquidez,      peso: 1 },
+        margen:        { valor: metricas.margen,            puntos: ptMargen,        disponible: dispMargen,        peso: 1 },
+        dias_caja:     { valor: metricas.dias_caja,         puntos: ptDiasCaja,      disponible: dispDiasCaja,      peso: 1 },
+        endeudamiento: { valor: metricas.endeudamiento,     puntos: ptEndeudamiento, disponible: dispEndeudamiento, peso: 1 },
+        control:       { valor: metricas.pct_categorizado,  puntos: ptControl,       disponible: dispControl,       peso: 2 },
+        dias_cobro:    { valor: metricas.dias_cobro,        puntos: 0,               disponible: false,             peso: 0 },
       },
       variacion_vs_mes_anterior: score !== null && scoreAnt !== null ? score - scoreAnt : null,
     });
