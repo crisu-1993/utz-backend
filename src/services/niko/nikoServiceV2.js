@@ -942,8 +942,9 @@ ${topLines}${avisoSinCat}`;
     bloqueScore =
       `\n\n═══ UTZ FINANCE SCORE — ${_sc.label} ═══\n` +
       `El Score de salud financiera que el cliente ve en su dashboard. Calculado por el\n` +
-      `sistema; es tu fuente de verdad. Comunícalo con este dato; NO inventes la fórmula\n` +
-      `ni los umbrales, NO lo recalcules.\n\n` +
+      `sistema; es tu fuente de verdad. Comunícalo con este dato. Puedes explicar en simple\n` +
+      `QUÉ pondera (tus indicadores clave en una nota general), pero NO inventes los umbrales\n` +
+      `ni los pesos numéricos, NO lo recalcules.\n\n` +
       `Score: ${_sc.score}/100 — ${_sc.estado}. Basado en ${_sc.indicadores_disponibles} de ${_sc.indicadores_totales} indicadores.\n` +
       `Liquidez: ${estadoTxt(d.liquidez.puntos, d.liquidez.disponible)} · ` +
       `Margen: ${estadoTxt(d.margen.puntos, d.margen.disponible)} · ` +
