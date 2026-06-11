@@ -323,6 +323,38 @@ async function obtenerContextoFinanciero(empresa_id) {
     }
   }
 
+  // ── Score del último mes con datos (para Niko) ────────────────────────────
+  let score_ultimo_mes = null;
+  if (ultimo_mes_con_datos) {
+    try {
+      const { getSupabase: _getSupabase, calcularMetricas, calcularScoreNormalizado, estadoScore } =
+        require('../scoreCalculator'); // lazy — mismo patrón que insightsIA
+      const _supabase = _getSupabase();
+      const metricas = await calcularMetricas(_supabase, empresa_id, ultimo_mes_con_datos.año, ultimo_mes_con_datos.mes);
+      const r   = calcularScoreNormalizado(metricas);
+      const est = r.score !== null ? estadoScore(r.score) : { estado: 'sin_datos' };
+      score_ultimo_mes = {
+        score:                   r.score,
+        estado:                  est.estado,
+        indicadores_disponibles: r.nDisponibles,
+        indicadores_totales:     5,
+        pct_categorizado:        metricas.pct_categorizado,
+        detalle: {
+          liquidez:      { puntos: r.ptLiquidez,      disponible: r.dispLiquidez      },
+          margen:        { puntos: r.ptMargen,        disponible: r.dispMargen        },
+          dias_caja:     { puntos: r.ptDiasCaja,      disponible: r.dispDiasCaja      },
+          endeudamiento: { puntos: r.ptEndeudamiento, disponible: r.dispEndeudamiento },
+          control:       { puntos: r.ptControl,       disponible: r.dispControl       },
+        },
+        mes:   ultimo_mes_con_datos.mes,
+        anio:  ultimo_mes_con_datos.año,
+        label: ultimo_mes_con_datos.label,
+      };
+    } catch (e) {
+      console.error('[contextoFinanciero] score:', e.message);
+    }
+  }
+
   return {
     meses_disponibles,
     ultimo_mes_con_datos,
@@ -333,6 +365,7 @@ async function obtenerContextoFinanciero(empresa_id) {
     reglas_activas,
     es_primera_sesion,
     insights_ultimo_mes,
+    score_ultimo_mes,
   };
 }
 
