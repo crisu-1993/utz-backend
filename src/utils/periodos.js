@@ -1,5 +1,16 @@
 // src/utils/periodos.js
 
+// ─── Helper: fecha local → string YYYY-MM-DD ──────────────────────────────────
+// Evita el bug UTC de toISOString(): en Chile (UTC-4/-3), convertir a ISO corre
+// el día adelante cuando la hora local es 23:xx (el UTC ya es el día siguiente).
+// Usa los componentes locales del objeto Date directamente.
+function toDateStr(d) {
+  const yyyy = d.getFullYear();
+  const mm   = String(d.getMonth() + 1).padStart(2, '0');
+  const dd   = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 // ─── Calcular rango de fechas según período ───────────────────────────────────
 function calcularRango(periodo) {
   const hoy = new Date();
@@ -33,8 +44,8 @@ function calcularRango(periodo) {
   }
 
   return {
-    fecha_inicio: inicio.toISOString().split('T')[0],
-    fecha_fin:    fin.toISOString().split('T')[0],
+    fecha_inicio: toDateStr(inicio),
+    fecha_fin:    toDateStr(fin),
   };
 }
 
@@ -72,8 +83,8 @@ function calcularRangoAnterior(periodo) {
   }
 
   return {
-    fecha_inicio: inicio.toISOString().split('T')[0],
-    fecha_fin:    fin.toISOString().split('T')[0],
+    fecha_inicio: toDateStr(inicio),
+    fecha_fin:    toDateStr(fin),
   };
 }
 
