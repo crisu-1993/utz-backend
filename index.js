@@ -37,6 +37,8 @@ app.use('/api/niko',              require('./src/routes/niko'));
 app.use('/api/niko-v2',           require('./src/routes/nikoV2'));   // ← V2 paralela (switch en Bloque 10)
 app.use('/api/recordatorios',     require('./src/routes/recordatorios'));
 app.use('/api/categorias',        require('./src/routes/categorias'));
+app.use('/api/notificaciones-config', require('./src/routes/notificacionesConfig'));
+app.use('/api/resumen-semanal',      require('./src/routes/resumenSemanalDisparo'));
 
 app.listen(PORT, () => {
   console.log(`UTZ Backend escuchando en http://localhost:${PORT}`);
