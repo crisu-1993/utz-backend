@@ -3,7 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const { sincronizarTodasLasEmpresas } = require('./src/services/fintocService');
 const { generarRecordatoriosTributarios } = require('./src/services/recordatoriosTributarios');
-const { generarRecordatoriosFeriados } = require('./src/services/recordatoriosFeriados');
+const { generarRecordatoriosFeriados }    = require('./src/services/recordatoriosFeriados');
+const { iniciarCronResumenSemanal }       = require('./src/services/cronResumenSemanal');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -104,4 +105,7 @@ app.listen(PORT, () => {
   }, INTERVALO_FERIADOS_MS);
 
   console.log(`[feriados-cron] Cron de feriados activo (cada ${INTERVALO_FERIADOS_MS / 3600000} h)`);
+
+  // ─── Cron del resumen semanal (cada 15 min, dispara según hora de Chile) ───
+  iniciarCronResumenSemanal();
 });
